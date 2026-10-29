@@ -26,6 +26,11 @@ Steps (results/pumpfun_realtime_plan.md):
     tripled priority fee, and the pick with the model filter; out-of-sample numbers
     are the trades signalled after the split. The wallet reputation and the name
     categories are point in time.
+    Since 2026-10-29 pass 2 is split in two (the job had grown from 2,676 s to 12,943 s in a week as the record
+    filled up to WINDOW_DAYS): the model-free part of pass 2 (the rules, their stress twins, every row) is one
+    replay, and pass 1 with the part of pass 2 that needs its models (the model rule, the strategies and their
+    twins) runs as model_half in a second process at the same time, its LightGBM answers to a row asked again
+    remembered (_Memo). Same numbers as the two passes (tests/test_pumpfun_rt.py replays both).
  6. The bar for every rule and strategy; deflation against the lab's global pool.
  7. Readiness for live per strategy (the owner's gate: days, trades, positive with and
     without broken slots, every gate, 30 days of the live paper shadow in the band).
@@ -44,9 +49,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import pickle
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -253,16 +259,18 @@ def gates(name: str, oos: list[dict], oos_failed: list[dict], stress: dict[str, 
 
 # ---------------------------------------------------------------- the run
 
-def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=print, shadow: dict | None = None) -> dict:
-    """Both passes, the bar for every rule and strategy, and the readiness of each strategy."""
-    res = _run(now_ms, window, root, log)
+def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=print, shadow: dict | None = None,
+        parallel: bool = True) -> dict:
+    """Both passes, the bar for every rule and strategy, and the readiness of each strategy (parallel: the model
+    half of pass 2 in its own process)."""
+    res = _run(now_ms, window, root, log, parallel)
     if not res.get("empty"):
         res["shadow"] = shadow if shadow is not None else shadow_stats(res["now_ms"])
         res["readiness"] = readiness(res["results"], len(res["days"]), res["shadow"])
     return res
 
 
-def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=print) -> dict:
+def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=print, parallel: bool = True) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     today = _day(now_ms)
     all_days = store.days(root)
@@ -281,15 +289,148 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
     from .categorize import CategoryIndex
     cats = CategoryIndex.load(None if root is None else Path(root) / "categories")
 
-    # pass 1: in sample
+    # The record is read twice at once: e0 here is the model-free part of pass 2 (every rule and its stress twins,
+    # the decision rows, X14's early rows, Y9's and R2's label pipes), and model_half, in a second process while e0
+    # replays (parallel), runs pass 1 and then the part of pass 2 that needs its models (the pick's model rule, every
+    # pipeline strategy and its stress twins). What the two engines of pass 2 hold apart never meets (positions,
+    # books and label pipes are per rule), so their union is the old single pass 2.
     t0 = time.time()
     keep = min(1.0, X14_KEEP_DAYS / max(1, len(days)))
-    e1 = sim.Engine(S.RULES, book=warm_book(warm, root), decisions=True, entry_until=split,
-                    wallets=W.warm(warm, root), cats=cats, early_rows=True, snipers=EA.warm_snipers(warm, root),
-                    select=True, trend=True, social=SO.warm(warm, root))
-    e1.early.keep_frac = keep
+    base = C.Costs()
+    rules = list(S.RULES)
+    costs = {}
+    for r in S.RULES:
+        for suffix, c in (("lat2x", base.scaled(latency=LAT_STRESS)), ("prio3x", base.scaled(priority=PRIO_STRESS))):
+            v = sim.variant(r, suffix)
+            rules.append(v)
+            costs[v.name] = c
+    # the warm-up once (reading 7 days of trades is the run's largest memory peak), a copy for each engine
+    warmed = pickle.dumps((warm_book(warm, root), W.warm(warm, root), EA.warm_snipers(warm, root), SO.warm(warm, root)),
+                          protocol=pickle.HIGHEST_PROTOCOL)
+    book, wallets, snipers, social = pickle.loads(warmed)
+    e0 = sim.Engine(rules, book=book, decisions=True, rule_costs=costs, wallets=wallets, cats=cats, early_rows=True,
+                    snipers=snipers, select=True, trend=True, social=social)
+    e0.early.keep_frac = keep
     real = R.Model()                                         # R2: the day's realistic fit (realistic.json)
-    lab1 = e1.add_pipe(L2.RealLabelPipe(e1, real))           # Y9: the select models' rows, executed as live (R2)
+    lab2 = e0.add_pipe(SF.LabelPipe(e0, select_costs()))   # Y9: every row of the record, the old labels (_ideal)
+    lab2r = e0.add_pipe(L2.RealLabelPipe(e0, real))          # R2: the same rows executed as live, for the retrain
+    e0.r2 = L2.Labels(e0, real)                              # R2: the decision and early rows' realistic labels
+    job = {"days": days, "root": root, "split": split, "params": dict(M.PARAMS), "warmed": warmed}
+    if parallel:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(1, mp_context=mp.get_context("spawn")) as ex:
+            fut = ex.submit(model_half, job)
+            sim.replay(days, e0, root)
+            half = fut.result()
+    else:
+        half = model_half(job)
+        sim.replay(days, e0, root)
+    for line in half["log"]:
+        log(line)
+    pick = half["pick"]
+    mr = sim.model_rule(S.BY_NAME[pick])
+    closed, failed = e0.closed + half["closed"], e0.failed + half["failed"]
+    skipped = e0.skipped + Counter(half["skipped"])
+    counts2 = Counter(e0.counts)
+    counts2.update({k: v for k, v in half["counts"].items() if k not in RECORD_COUNTS})
+    log(f"{NAME}: pass 2 in {time.time() - t0:.0f} s, {len(closed)} closed paper trades, {len(e0.rows)} model rows")
+
+    trades = defaultdict(lambda: {"is": [], "oos": []})
+    fails = defaultdict(lambda: {"is": [], "oos": []})
+    for t in closed:
+        trades[t["rule"]]["oos" if t["signal_ms"] >= split else "is"].append(t)
+    for f in failed:
+        fails[f["rule"]]["oos" if f["signal_ms"] >= split else "is"].append(f)
+    days_oos = [d for d in days if d >= _day(split)]
+    sharpes = []
+    judged = S.RULES + [mr] + list(P.STRATEGIES)
+    for r in judged:
+        x = daily_pnl(trades[r.name]["is"], fails[r.name]["is"], [d for d in days if d <= _day(split)])
+        sharpes.append(float(x.mean() / x.std() * math.sqrt(365)) if len(x) > 1 and x.std() > 0 else 0.0)
+    pl_ = pool(sharpes)
+    results = []
+    for r in judged:
+        stress = {} if r is mr else {s: trades[f"{r.name}@{s}"]["oos"] for s in ("lat2x", "prio3x")}
+        g = gates(r.name, trades[r.name]["oos"], fails[r.name]["oos"], stress, days_oos, pl_,
+                  base=trades[pick]["oos"] if r is mr else None)
+        g.update(family=r.family, label=r.label, is_stats=trade_stats(trades[r.name]["is"], fails[r.name]["is"]),
+                 stress={s: trade_stats(v) for s, v in stress.items()}, pipeline=P.is_strategy(r),
+                 exits=_exit_mix(trades[r.name]["oos"]) if P.is_strategy(r) else None,
+                 capture=XP.pipeline_capture(trades[r.name]["oos"], half["max_done"], base.tx_lamports())
+                 if P.is_strategy(r) else None)
+        results.append(g)
+
+    table = e0.table()
+    rec = record_stats(days, root)
+    try:                                                     # our detection latency over the last 24 hours
+        from . import latency as LT
+        lat = LT.summary(days[-2:], root, now_ms=now_ms, hours=24)
+    except Exception as e:                                   # the study goes on without it
+        log(f"{NAME}: latency failed ({type(e).__name__}: {e})")
+        lat = None
+    x14 = e0.early.tables()
+    return {"now_ms": now_ms, "days": days, "warm": warm, "split_ms": split, "span": (t_lo, t_hi), "pick": pick,
+            "picked_by": half["picked_by"], "results": results, "pool": pl_,
+            "table": table, "record": rec, "x14": x14, "x14_keep": keep, "latency": lat,
+            "select_rows": lab2r.table(), "select_rows_ideal": lab2.table(),
+            "counts": {"pass1": half["pass1"], "pass2": dict(counts2)},
+            "skipped": {f"{k[0]}: {k[1]}": v for k, v in skipped.items() if "@" not in k[0]},
+            "failed_why": dict(sorted(((w, sum(1 for f in failed if f["why"] == w and "@" not in f["rule"]))
+                                       for w in {f["why"] for f in failed}), key=lambda x: -x[1])),
+            "rows": len(table["t"])}
+
+
+# Counts of the record itself (every engine counts them alike): pass 2's are e0's; the rest add up over both engines.
+RECORD_COUNTS = {"tokens", "curve_trades", "curve_breaks", "curve_tokens", "curve_tokens_broken"}
+
+
+class _Memo:
+    """A booster that remembers its single-row answers: a strategy and its stress twins, and strategies sharing a
+    filter, ask the same model about the same row at the same moment. The same numbers, fewer LightGBM calls."""
+    MAX = 50_000
+
+    def __init__(self, booster):
+        self.booster, self.seen = booster, {}
+
+    def predict(self, X, *a, **kw):
+        if a or kw or getattr(X, "shape", (0,))[0] != 1:
+            return self.booster.predict(X, *a, **kw)
+        key = X.tobytes()
+        v = self.seen.get(key)
+        if v is None:
+            if len(self.seen) >= self.MAX:
+                self.seen.clear()
+            v = self.seen[key] = self.booster.predict(X)
+        return v.copy()
+
+    def __getattr__(self, name):
+        return getattr(self.__dict__["booster"], name)
+
+
+def model_half(job: dict) -> dict:
+    """Pass 1 (the in-sample half with every rule: the pick by in-sample mean and the in-sample models of the decision
+    rows, X14 and Y9) and then the part of pass 2 that needs those models on the whole record: the pick's model rule
+    and every pipeline strategy with its stress twins, from the same warm-up as e0, without the rows e0 keeps. Runs
+    in its own process when the study is parallel (job["params"]: the caller's LightGBM settings, job["warmed"]: the
+    warm-up pickled); returns the pick,
+    pass 1's counts, pass 2's closed and failed trades, skips, counts, X14's capture marks and its log lines."""
+    import copy
+    days, root, split = job["days"], job["root"], job["split"]
+    M.PARAMS.update(job["params"])
+    out = []
+
+    def log(x) -> None:
+        out.append(str(x))
+    from .categorize import CategoryIndex
+    cats = CategoryIndex.load(None if root is None else Path(root) / "categories")
+    t0 = time.time()
+    keep = min(1.0, X14_KEEP_DAYS / max(1, len(days)))
+    book, wallets, snipers, social = pickle.loads(job["warmed"])
+    e1 = sim.Engine(S.RULES, book=book, decisions=True, entry_until=split, wallets=wallets, cats=cats,
+                    early_rows=True, snipers=snipers, select=True, trend=True, social=social)
+    e1.early.keep_frac = keep
+    lab1 = e1.add_pipe(L2.RealLabelPipe(e1, R.Model()))     # Y9: the select models' rows, executed as live (R2)
     sim.replay(days, e1, root, until_ms=split + 45 * 60_000)
     is_trades = [t for t in e1.closed if t["signal_ms"] < split]
     by_rule = defaultdict(list)
@@ -308,81 +449,36 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
         is_models.update(SM.train(lab1.table(), until_ms=split))
     except Exception as e:                                   # the study goes on; the Y9 books then wait
         log(f"{NAME}: Y9 in-sample models failed ({type(e).__name__}: {e})")
-    del e1.early
+    pass1 = dict(e1.counts)
+    del e1, lab1
     log(f"{NAME}: pass 1 in {time.time() - t0:.0f} s, {len(is_trades)} in-sample trades, pick {pick}"
         + ("" if cands else f" (no rule had {MIN_IS_TRADES} in-sample trades: the default)"))
+    del is_trades, by_rule
 
-    # pass 2: everything
     t0 = time.time()
+    models = {}
+    for k, m in is_models.items():
+        if hasattr(getattr(m, "booster", None), "predict"):
+            m = copy.copy(m)
+            m.booster = _Memo(m.booster)
+        models[k] = m
     base = C.Costs()
-    rules = list(S.RULES)
     costs = {}
-    for r in S.RULES:
-        for suffix, c in (("lat2x", base.scaled(latency=LAT_STRESS)), ("prio3x", base.scaled(priority=PRIO_STRESS))):
-            v = sim.variant(r, suffix)
-            rules.append(v)
-            costs[v.name] = c
-    mr = sim.model_rule(S.BY_NAME[pick])
-    rules.append(mr)
     strats = list(P.STRATEGIES)
     for s in P.STRATEGIES:
         for suffix, c in (("lat2x", base.scaled(latency=LAT_STRESS)), ("prio3x", base.scaled(priority=PRIO_STRESS))):
             v = P.variant(s, suffix)
             strats.append(v)
             costs[v.name] = c
-    e2 = sim.Engine(rules, book=warm_book(warm, root), decisions=True, model=M.Filter(is_models), rule_costs=costs,
-                    strategies=strats, wallets=W.warm(warm, root), cats=cats, models=is_models, early_rows=True,
-                    snipers=EA.warm_snipers(warm, root), select=True, trend=True, social=SO.warm(warm, root))
-    e2.early.keep_frac = keep
-    lab2 = e2.add_pipe(SF.LabelPipe(e2, select_costs()))   # Y9: every row of the record, the old labels (_ideal)
-    lab2r = e2.add_pipe(L2.RealLabelPipe(e2, real))          # R2: the same rows executed as live, for the retrain
-    e2.r2 = L2.Labels(e2, real)                              # R2: the decision and early rows' realistic labels
-    sim.replay(days, e2, root)
-    log(f"{NAME}: pass 2 in {time.time() - t0:.0f} s, {len(e2.closed)} closed paper trades, {len(e2.rows)} model rows")
-
-    trades = defaultdict(lambda: {"is": [], "oos": []})
-    fails = defaultdict(lambda: {"is": [], "oos": []})
-    for t in e2.closed:
-        trades[t["rule"]]["oos" if t["signal_ms"] >= split else "is"].append(t)
-    for f in e2.failed:
-        fails[f["rule"]]["oos" if f["signal_ms"] >= split else "is"].append(f)
-    days_oos = [d for d in days if d >= _day(split)]
-    sharpes = []
-    judged = S.RULES + [mr] + list(P.STRATEGIES)
-    for r in judged:
-        x = daily_pnl(trades[r.name]["is"], fails[r.name]["is"], [d for d in days if d <= _day(split)])
-        sharpes.append(float(x.mean() / x.std() * math.sqrt(365)) if len(x) > 1 and x.std() > 0 else 0.0)
-    pl_ = pool(sharpes)
-    results = []
-    for r in judged:
-        stress = {} if r is mr else {s: trades[f"{r.name}@{s}"]["oos"] for s in ("lat2x", "prio3x")}
-        g = gates(r.name, trades[r.name]["oos"], fails[r.name]["oos"], stress, days_oos, pl_,
-                  base=trades[pick]["oos"] if r is mr else None)
-        g.update(family=r.family, label=r.label, is_stats=trade_stats(trades[r.name]["is"], fails[r.name]["is"]),
-                 stress={s: trade_stats(v) for s, v in stress.items()}, pipeline=P.is_strategy(r),
-                 exits=_exit_mix(trades[r.name]["oos"]) if P.is_strategy(r) else None,
-                 capture=XP.pipeline_capture(trades[r.name]["oos"], e2.early.max_done, base.tx_lamports())
-                 if P.is_strategy(r) else None)
-        results.append(g)
-
-    table = e2.table()
-    rec = record_stats(days, root)
-    try:                                                     # our detection latency over the last 24 hours
-        from . import latency as LT
-        lat = LT.summary(days[-2:], root, now_ms=now_ms, hours=24)
-    except Exception as e:                                   # the study goes on without it
-        log(f"{NAME}: latency failed ({type(e).__name__}: {e})")
-        lat = None
-    x14 = e2.early.tables()
-    return {"now_ms": now_ms, "days": days, "warm": warm, "split_ms": split, "span": (t_lo, t_hi), "pick": pick,
-            "picked_by": "in-sample mean" if cands else "default", "results": results, "pool": pl_,
-            "table": table, "record": rec, "x14": x14, "x14_keep": keep, "latency": lat,
-            "select_rows": lab2r.table(), "select_rows_ideal": lab2.table(),
-            "counts": {"pass1": dict(e1.counts), "pass2": dict(e2.counts)},
-            "skipped": {f"{k[0]}: {k[1]}": v for k, v in e2.skipped.items() if "@" not in k[0]},
-            "failed_why": dict(sorted(((w, sum(1 for f in e2.failed if f["why"] == w and "@" not in f["rule"]))
-                                       for w in {f["why"] for f in e2.failed}), key=lambda x: -x[1])),
-            "rows": len(table["t"])}
+    book, wallets, snipers, social = pickle.loads(job["warmed"])
+    e = sim.Engine([sim.model_rule(S.BY_NAME[pick])], book=book, model=M.Filter(models), rule_costs=costs,
+                   strategies=strats, wallets=wallets, cats=cats, models=models, snipers=snipers, select=True,
+                   trend=True, social=social)
+    sim.replay(days, e, root)
+    log(f"{NAME}: the model half of pass 2 in {time.time() - t0:.0f} s")
+    return {"pick": pick, "picked_by": "in-sample mean" if cands else "default", "pass1": pass1, "closed": e.closed,
+            "failed": e.failed, "skipped": dict(e.skipped), "counts": dict(e.counts), "max_done": e.early.max_done,
+            "log": out}
 
 
 def _exit_mix(trades: list[dict]) -> dict:

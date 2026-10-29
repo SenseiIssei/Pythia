@@ -359,6 +359,94 @@ def test_gecko_run_pools_bars_liquidity_backfill_and_backoff(tmp_path):
     assert S.default_source("SPYx", root) == "gecko"
 
 
+def test_gecko_work_puts_empty_first_then_the_cursor_then_the_stalest():
+    now = T0
+    due = {"1h/SOL": now - 2 * HOUR, "1h/WIF": 0, "1d/SOL": now - 3 * DAY, "1d/WIF": 0, "1h/BTC": now - 5 * HOUR,
+           "1h/ETH": now - HOUR}
+    assert L.gecko_work(due, ["back/SOL"], [], now) == ["1h/WIF", "1d/WIF", "1h/BTC", "1d/SOL", "1h/SOL", "1h/ETH",
+                                                        "back/SOL"]
+    assert L.gecko_work(due, ["back/SOL"], ["1h/ETH", "back/SOL", "1h/SOL"], now) == \
+        ["1h/WIF", "1d/WIF", "1h/ETH", "1h/SOL", "1h/BTC", "1d/SOL", "back/SOL"]
+
+
+def test_gecko_429_stops_the_run_saves_the_cursor_and_the_next_run_resumes(tmp_path):
+    root, now = tmp_path / "d", T0 + 30 * MIN
+    csv = tmp_path / "tokens.csv"
+    csv.write_text("symbol,mint,kind\nSPYx,MINT_SPYX,sp500\nQQQx,MINT_QQQX,nasdaq\n")
+    cfg = {**CFG, "tokens": ["SPYx", "QQQx"], "coins": ["SOL"]}
+    g = FakeGecko(now, T0 - 10 * DAY)
+    state = {}
+    old = FakeGecko(now - 3 * HOUR, T0 - 10 * DAY)                 # SOL 1h has bars to 3 h ago, every other is empty
+    S.write("gecko", "SOL", "1h", L.gecko_rows(old(L._ohlcv_url({"pool": "P", "side": "base"}, "1h", 3)), "1h",
+                                               now - 3 * HOUR), now, root)
+    g.limit_after = 3 + 1 + 2                                        # 3 pool lookups, the liquidity, 2 bars
+    res = L.run_gecko(g, cfg, state, now, root, csv)
+    assert res["stopped"] == "HTTP 429" and res["fetched"] == ["1h/SPYx", "1h/QQQx"]
+    assert res["left"] == ["1d/SOL", "1d/SPYx", "1d/QQQx", "1h/SOL", "back/SOL", "back/SPYx", "back/QQQx"]
+    cur = json.loads((root / "candles" / L.CURSOR).read_text())
+    assert cur["left"] == res["left"] and cur["stopped"] == "HTTP 429"
+    said = L.gecko_said(res)
+    assert "2 pools fetched" in said and "3 pools left (7 items: 1d/SOL" in said and "stopped on HTTP 429, cursor saved" in said
+    assert chr(0x2014) not in said
+    g.limit_after, n = None, len(g.urls)
+    state["gecko"].pop("backoff")
+    res = L.run_gecko(g, cfg, state, now + 5 * MIN, root, csv)      # resumes at 1d/SOL, no lookup again
+    ohlcv = [u for u in g.urls[n:] if "/ohlcv/" in u]
+    assert "/ohlcv/day" in ohlcv[0] and "/pools/multi/" in g.urls[n] and not any("/tokens/" in u for u in g.urls[n:])
+    assert res["fetched"][:4] == ["1d/SOL", "1d/SPYx", "1d/QQQx", "1h/SOL"] and res["stopped"] is None
+    assert res["left"] == [] and json.loads((root / "candles" / L.CURSOR).read_text())["left"] == []
+    assert S.read_manifest(root)["markets"]["gecko/QQQx/1d"]["last_end_us"] == T0
+    assert "not stopped" in L.gecko_said(res)
+
+
+def test_gecko_run_stops_on_its_time_budget_and_keeps_the_rest(tmp_path):
+    root, now = tmp_path / "d", T0 + 30 * MIN
+    csv = tmp_path / "tokens.csv"
+    csv.write_text("symbol,mint,kind\nSPYx,MINT_SPYX,sp500\n")
+    clock = [0.0]
+    g = FakeGecko(now, T0 - 10 * DAY)
+
+    def get(url):
+        clock[0] += 50.0
+        return g(url)
+    get.clock = lambda: clock[0]
+    res = L.run_gecko(get, {**CFG, "gecko_run_s": 200}, {}, now, root, csv)  # 2 lookups and the liquidity: 150 s
+    assert res["stopped"] == "the run's time budget" and res["fetched"] == ["1h/SOL"]
+    assert res["left"][0] == "1h/SPYx" and json.loads((root / "candles" / L.CURSOR).read_text())["left"] == res["left"]
+
+
+class Resp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_markets_run_paces_gecko_backs_off_once_on_429_then_stops(tmp_path, monkeypatch):
+    root, now = tmp_path / "d", T0 + 30 * MIN
+    csv = tmp_path / "tokens.csv"
+    csv.write_text("symbol,mint,kind\nSPYx,MINT_SPYX,sp500\n")
+    monkeypatch.setattr(S, "config", lambda: {**CFG, "gecko_gap_s": 2.5, "gecko_retry_s": 60, "yahoo": []})
+    clock, slept, urls = [0.0], [], []
+    monkeypatch.setattr(L.time, "sleep", lambda s: (slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    monkeypatch.setattr(L.time, "monotonic", lambda: clock[0])
+    g = FakeGecko(now, T0 - 10 * DAY)
+
+    def urlopen(req, timeout):
+        urls.append(req.full_url)
+        if len(urls) >= 5:                                            # the 5th call and after: 429, Retry-After 7
+            raise urllib.error.HTTPError(req.full_url, 429, "too many", {"Retry-After": "7"}, None)
+        return Resp(json.dumps(g(req.full_url)).encode())
+    monkeypatch.setattr(L.urllib.request, "urlopen", urlopen)
+    res = L.run_markets(now=now, root=root, tokens_csv=csv)
+    assert slept == [2.5] * 4 + [7.0] and len(urls) == 6 and urls[4] == urls[5]
+    assert res["gecko_stopped"] == "HTTP 429" and res["gecko_fetched"] == 1 and res["gecko_left"] > 0
+    assert "stopped on HTTP 429, cursor saved" in res["said"] and "after one backoff" in res["errors"][0]
+    cur = json.loads((root / "candles" / L.CURSOR).read_text())
+    assert cur["left"][0] == "1h/SPYx" and len(cur["left"]) == res["gecko_left"] and cur["stopped"] == "HTTP 429"
+
+
 # ---------------------------------------------------------------- Yahoo
 
 def test_yahoo_rows_daily_at_utc_midnight_and_hourly():
@@ -434,9 +522,30 @@ def test_health_is_red_when_a_live_source_is_stale(tmp_path, monkeypatch):
     S.write("kraken", "BTC", "1m", bar(now - 3 * MIN, MIN), now, root)
     S.write("gecko", "SPYx", "1h", bar(now - 2 * HOUR, HOUR), now, root)
     ok, msg = S.health(now, root)
-    assert ok and "stale: ETH" in msg
+    assert not ok and "gecko 1h: 1 of 2 pools over 3 h (SOL none)" in msg and "gecko 1d: 2 of 2 pools" in msg
+    for a in ("SPYx", "SOL"):
+        S.write("gecko", a, "1h", bar(now - 2 * HOUR, HOUR), now, root)
+        S.write("gecko", a, "1d", bar(now - DAY - 2 * HOUR, DAY), now, root)
+    ok, msg = S.health(now, root)
+    assert ok and "stale: ETH" in msg and "gecko 1h 2 pools" in msg and "gecko 1d 2 pools" in msg
     ok, msg = S.health(now + 40 * MIN, root)
     assert not ok and "binance_rest 1m: newest bar" in msg and "kraken" in msg
+
+
+def test_health_is_red_per_pool_not_on_the_newest_one(tmp_path, monkeypatch):
+    root, now = tmp_path / "d", T0 + DAY
+    monkeypatch.setattr(S, "config", lambda: {**CFG, "tokens": ["SPYx", "QQQx"], "coins": ["SOL"]})
+    bar = lambda t, p: pl.DataFrame({"open_time_us": [t], "close_time_us": [t + p], "open": [1.0], "high": [1.0],
+                                     "low": [1.0], "close": [1.0]})
+    S.write("binance_rest", "BTC", "1m", bar(now - 2 * MIN, MIN), now, root)
+    S.write("kraken", "BTC", "1m", bar(now - 2 * MIN, MIN), now, root)
+    for a in ("SPYx", "SOL"):                                        # SOL fresh, SPYx 5 h late, QQQx never fetched
+        S.write("gecko", a, "1h", bar(now - (HOUR if a == "SOL" else 5 * HOUR), HOUR), now, root)
+        S.write("gecko", a, "1d", bar(now - DAY - (0 if a == "SOL" else 3 * DAY), DAY), now, root)
+    S.write("gecko", "JUP", "1h", bar(now - HOUR, HOUR), now, root)   # in the store, not configured: still watched
+    ok, msg = S.health(now, root)
+    assert not ok and "gecko 1h: 2 of 4 pools over 3 h (SPYx 4 h, QQQx none)" in msg
+    assert "gecko 1d: 3 of 4 pools over 48 h (SPYx 72 h, QQQx none, JUP none)" in msg and "SOL" not in msg
 
 
 def test_gaps_and_the_report(lake):

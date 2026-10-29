@@ -156,21 +156,107 @@ def test_collector_writes_the_lake(tmp_path):
     assert pl.read_parquet(base / "daily" / "steam" / "date=2026-10-15.parquet").height == 10
 
 
-def test_collector_stops_steam_after_repeated_429(tmp_path):
+def steam_calls(net):
+    return sum(1 for u in net.calls if u.startswith(collect.STEAM_PRICE))
+
+
+def test_collector_stops_steam_after_429_and_cools_down(tmp_path):
     items, sales = momentum_market(20)
-    rep = collect.run(tmp_path, fetch=FakeNet(items, sales, steam_429=10), steam_max=5, now_ms=NOW, sleep=lambda s: None)
-    assert rep["steam_rate_limited"] and rep["steam_ok"] == 0 and rep["steam_cursor"] == 0
-    assert rep["ok"]  # Skinport still collected
-    # the next run knocks once and gives up at the first 429, without waiting
+    H = 3_600_000
+    net = FakeNet(items, sales, steam_429=10)
+    rep = collect.run(tmp_path, fetch=net, steam_max=5, now_ms=NOW, sleep=lambda s: None)
+    # one wait, the second 429 ends Steam for the run; Skinport still collected
+    assert steam_calls(net) == 2 and rep["steam_rate_limited"] and rep["steam_ok"] == 0 and rep["steam_cursor"] == 0
+    assert rep["ok"] and rep["steam_failed"]
+    assert (tmp_path / "cs2" / "daily" / "skinport" / "date=2026-10-15.parquet").exists()
+    st = json.loads((tmp_path / "cs2" / "steam_state.json").read_text())
+    assert st["cooldown_s"] == 3600 and st["until_ms"] == NOW + H and st["refusals"] == 1
+    assert any(e.startswith("steam refused (429), cooling down until 2026-10-15T13:05Z") for e in rep["errors"])
+    # inside the cool-down: no Steam request at all, a plain refused line, not a failure
+    net = FakeNet(items, sales)
+    rep2 = collect.run(tmp_path, fetch=net, steam_max=5, now_ms=NOW + H // 2, sleep=lambda s: None)
+    assert steam_calls(net) == 0 and rep2["steam_skipped"] and rep2["steam_cooling"] and not rep2["steam_failed"]
+    assert rep2["errors"] == ["steam refused (429), cooling down until 2026-10-15T13:05Z"] and rep2["ok"]
+    # expired: knocks once, refused again, the cool-down doubles
     net, slept = FakeNet(items, sales, steam_429=10), []
-    rep2 = collect.run(tmp_path, fetch=net, steam_max=5, now_ms=NOW + 3_600_000, sleep=slept.append)
-    assert rep2["steam_cooling"] and rep2["steam_rate_limited"] and slept == []
-    assert sum(1 for u in net.calls if u.startswith(collect.STEAM_PRICE)) == 1
-    # once Steam answers again, the run after that is back to normal
-    rep3 = collect.run(tmp_path, fetch=FakeNet(items, sales), steam_max=5, now_ms=NOW + 7_200_000, sleep=lambda s: None)
-    assert rep3["steam_cooling"] and rep3["steam_ok"] == 5 and not rep3["steam_rate_limited"]
-    rep4 = collect.run(tmp_path, fetch=FakeNet(items, sales), steam_max=5, now_ms=NOW + 10_800_000, sleep=lambda s: None)
-    assert not rep4["steam_cooling"]
+    rep3 = collect.run(tmp_path, fetch=net, steam_max=5, now_ms=NOW + H, sleep=slept.append)
+    assert steam_calls(net) == 1 and slept == [] and rep3["steam_failed"]
+    st = json.loads((tmp_path / "cs2" / "steam_state.json").read_text())
+    assert st["cooldown_s"] == 7200 and st["until_ms"] == NOW + 3 * H and st["refusals"] == 2
+    # doubling stops at 12 h
+    t = NOW + 3 * H
+    for want in (14_400, 28_800, 43_200, 43_200):
+        collect.run(tmp_path, fetch=FakeNet(items, sales, steam_429=10), steam_max=5, now_ms=t, sleep=lambda s: None)
+        st = json.loads((tmp_path / "cs2" / "steam_state.json").read_text())
+        assert st["cooldown_s"] == want
+        t = st["until_ms"]
+    # Steam answers again: prices, the cool-down is gone, the next run is back to normal
+    rep4 = collect.run(tmp_path, fetch=FakeNet(items, sales), steam_max=5, now_ms=t, sleep=lambda s: None)
+    assert rep4["steam_cooling"] and rep4["steam_ok"] == 5 and not rep4["steam_failed"]
+    assert json.loads((tmp_path / "cs2" / "steam_state.json").read_text())["cooldown_s"] == 0
+    rep5 = collect.run(tmp_path, fetch=FakeNet(items, sales), steam_max=5, now_ms=t + H, sleep=lambda s: None)
+    assert not rep5["steam_cooling"] and rep5["steam_cursor"] == 10
+
+
+def test_collector_rotates_a_small_batch_through_the_watchlist(tmp_path, monkeypatch):
+    items, sales = momentum_market(20)
+    watch = [f"item {i}" for i in range(7)]
+    monkeypatch.setattr(collect, "steam_names", lambda w, s: watch)
+    assert collect.STEAM_MAX_PER_RUN <= 20  # a small batch by default
+    # with a batch of 3 the cursor wraps and every item gets its turn
+    monkeypatch.setattr(collect, "STEAM_MAX_PER_RUN", 3)
+    got = []
+    for k in range(3):
+        net = FakeNet(items, sales)
+        rep = collect.run(tmp_path, fetch=net, steam_max=collect.STEAM_MAX_PER_RUN, now_ms=NOW + k * 3_600_000,
+                          sleep=lambda s: None)
+        got.append([collect.urllib.parse.unquote(u[len(collect.STEAM_PRICE):]) for u in net.calls
+                    if u.startswith(collect.STEAM_PRICE)])
+    assert got == [watch[0:3], watch[3:6], [watch[6], watch[0], watch[1]]]
+    assert rep["steam_cursor"] == 2
+    assert json.loads((tmp_path / "cs2" / "steam_state.json").read_text())["cursor"] == 2
+
+
+def test_an_older_collector_json_carries_over(tmp_path):
+    items, sales = momentum_market(20)
+    base = tmp_path / "cs2"
+    base.mkdir()
+    (base / "collector.json").write_text(json.dumps({"steam_cursor": 4, "steam_rate_limited": True, "steam_ok": 0}))
+    net = FakeNet(items, sales, steam_429=10)
+    rep = collect.run(tmp_path, fetch=net, steam_max=5, now_ms=NOW, sleep=lambda s: None)
+    assert steam_calls(net) == 1 and rep["steam_cursor"] == 4  # knocked once, the cursor kept
+    assert json.loads((base / "steam_state.json").read_text())["cooldown_s"] == 3600
+
+
+def test_exit_code_follows_steam(tmp_path, monkeypatch, capsys):
+    items, sales = momentum_market(20)
+    real = collect.run
+    nets = {"net": FakeNet(items, sales, steam_429=10), "now": NOW}
+
+    def run(**kw):
+        return real(tmp_path, fetch=nets["net"], now_ms=nets["now"], sleep=lambda s: None, **kw)
+
+    monkeypatch.setattr(collect, "run", run)
+    assert collect.main([]) == 1  # Steam asked, refused: red
+    out = capsys.readouterr().out
+    assert "steam refused (429), cooling down until 2026-10-15T13:05Z" in out.splitlines()[0]
+    assert (tmp_path / "cs2" / "skinport_items" / "date=2026-10-15" / "1205.parquet").exists()
+    nets.update(net=FakeNet(items, sales), now=NOW + 600_000)
+    assert collect.main([]) == 0  # skipped for the cool-down: the refused line, not red
+    assert capsys.readouterr().out.startswith("steam refused (429), cooling down until 2026-10-15T13:05Z\n")
+    nets["now"] = NOW + 3_600_000
+    assert collect.main([]) == 0  # Steam answers again
+    assert collect.main(["--no-steam"]) == 0
+
+    # asked, answered 200 but no price in any of them: also red
+    def empty(url, headers):
+        if url.startswith(collect.STEAM_PRICE):
+            return 200, b'{"success": false}', {}
+        return FakeNet(items, sales)(url, headers)
+
+    nets.update(net=empty, now=NOW + 7_200_000)
+    assert collect.main([]) == 1
+    assert "steam: 0 of" in capsys.readouterr().out
 
 
 def test_collector_survives_a_skinport_failure(tmp_path):

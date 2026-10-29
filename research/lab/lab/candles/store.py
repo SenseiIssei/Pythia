@@ -567,12 +567,14 @@ def report(cov: list[dict], dis: list[dict], now: int) -> str:
 
 def health(now: int | None = None, root: Path | None = None) -> tuple[bool, str]:
     """Red when a live source's newest bar is older than its limit (markets.json stale_min): the Binance
-    REST fill, the Kraken candles, the GeckoTerminal pools."""
+    REST fill and the Kraken candles by their newest, every GeckoTerminal pool (the configured tokens and
+    coins and any in the store) on its own, 1h under stale_min gecko, 1d under gecko_1d (2 days)."""
     now = now or now_us()
-    lim = config().get("stale_min", {})
+    cfg = config()
+    lim = cfg.get("stale_min", {})
     man = read_manifest(root).get("markets", {})
     bad, ok = [], []
-    for src, tf in (("binance_rest", "1m"), ("kraken", "1m"), ("gecko", "1h")):
+    for src, tf in (("binance_rest", "1m"), ("kraken", "1m")):
         ends = {k.split("/")[1]: v.get("last_end_us") for k, v in man.items()
                 if k.startswith(f"{src}/") and k.endswith(f"/{tf}") and v.get("last_end_us")}
         limit = float(lim.get(src, 30)) * MIN
@@ -586,6 +588,20 @@ def health(now: int | None = None, root: Path | None = None) -> tuple[bool, str]
             bad.append(f"{src} {tf}: newest bar {age:.0f} min old")
         else:
             ok.append(f"{src} {tf} {age:.0f} min" + (f" (stale: {', '.join(stale[:5])})" if stale else ""))
+    pools = list(dict.fromkeys(cfg.get("tokens", []) + cfg.get("coins", []) +
+                               sorted({k.split("/")[1] for k in man if k.startswith("gecko/")})))
+    for tf, limit in (("1h", float(lim.get("gecko", 180)) * MIN), ("1d", float(lim.get("gecko_1d", 2880)) * MIN)):
+        late = []
+        for a in pools:
+            e = (man.get(f"gecko/{a}/{tf}") or {}).get("last_end_us")
+            if not e:
+                late.append(f"{a} none")
+            elif now - e > limit:
+                late.append(f"{a} {(now - e) / HOUR:.0f} h")
+        if late:
+            bad.append(f"gecko {tf}: {len(late)} of {len(pools)} pools over {limit / HOUR:.0f} h ({', '.join(late)})")
+        elif pools:
+            ok.append(f"gecko {tf} {len(pools)} pools")
     if bad:
         return False, "Candles stale: " + "; ".join(bad) + (f" (ok: {', '.join(ok)})" if ok else "")
     return True, "Candles ok: " + ", ".join(ok)

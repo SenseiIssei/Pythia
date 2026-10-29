@@ -6,6 +6,13 @@ forecasts, the paper collection, alerts, the Cards page's data and the report.
                                             step, no alert sent, no files
   python -m lab.pokemon.daily --no-alerts   everything but the alerts
 
+Exits 1 after everything is written when no price source has a price of
+the last three days (lab.collect.pokemon.stale_sources): the collector exits
+0 on a snapshot of old prices so that this part, chained with &&, still runs
+on them, and the job turns red here, with one line naming the stale sources
+and since when. A single stale source is named in that line and the report,
+the job stays green.
+
 Writes
   <lake>/ui/latest.json                     the Cards page (served read-only
                                             by the engine at /api/pokemon)
@@ -34,7 +41,7 @@ import numpy as np
 import polars as pl
 
 from .. import report
-from ..collect.pokemon import lake
+from ..collect.pokemon import lake, stale_sources
 from . import alerts, collection, links, model, study
 from . import data as pdata
 
@@ -208,15 +215,16 @@ def clean(v):
 
 def _freshness_line(meta: dict) -> str:
     fr = meta.get("freshness") or {}
+    stale = f"\n- Stale: {meta['stale'].split(': ', 2)[2]}." if meta.get("stale") else ""
     if not fr:
-        return "- Price freshness: not recorded by this collector run."
+        return "- Price freshness: not recorded by this collector run." + stale
     return (f"- Price freshness: TCGplayer {fr.get('tcgplayer_fresh', 0):,} of {fr.get('tcgplayer_cards', 0):,} "
             f"updated within a week (newest {fr.get('tcgplayer_newest') or 'n/a'}); Cardmarket "
             f"{fr.get('cardmarket_fresh', 0):,} of {fr.get('cardmarket_cards', 0):,} within two weeks (newest "
             f"{fr.get('cardmarket_newest') or 'n/a'}). Stale Cardmarket rows are left out of every Cardmarket "
             "number below (trend, averages, spread)." + (
                 " Sets were rebuilt from the cards (the /sets endpoint failed)." if meta.get("sets_source") == "cards"
-                else ""))
+                else "")) + stale
 
 
 def _tbl(rows: list[dict], cols: list[str]) -> str:
@@ -370,7 +378,8 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
     meta = {"snapshot": today, "cards": snap.height, "snapshots": df["date"].n_unique(),
             "sets": snap["set_id"].n_unique(), "eurusd": cmeta.get("eurusd"), "fx_source": cmeta.get("fx_source"),
             "sealed": cmeta.get("sealed"), "freshness": cmeta.get("freshness") or {},
-            "sets_source": cmeta.get("sets_source"), "collector_errors": cmeta.get("errors") or []}
+            "sets_source": cmeta.get("sets_source"), "collector_errors": cmeta.get("errors") or [],
+            "stale": stale_sources(root, datetime.now(timezone.utc).strftime("%Y-%m-%d"))[1]}
     pdir = root / "paper"
     month_before = collection.load_state(pdir).get("last_rebalance")
     if not dry_run:
@@ -436,7 +445,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-eval", action="store_true", help="skip the walk-forward (faster; forecasts use the prior)")
     a = ap.parse_args(argv)
     run(dry_run=a.dry_run, send_alerts=not a.no_alerts, evaluate=not a.no_eval)
-    return 0
+    red, line = stale_sources(lake(), datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    if line:
+        print(line, file=sys.stderr)
+    return 1 if red else 0
 
 
 if __name__ == "__main__":

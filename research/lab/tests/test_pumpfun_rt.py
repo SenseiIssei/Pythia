@@ -547,6 +547,131 @@ def test_the_study_runs_end_to_end_and_reports_with_the_feed_header(tmp_path, mo
     assert i18n.t("prt_daily_title", "de", day="x").startswith("pump.fun Echtzeit")
 
 
+def two_pass(root, days, split):
+    """The study's replay as it was until 2026-10-29: pass 1 on the in-sample half, then one pass 2 with every rule,
+    strategy and stress twin together (no warm-up days). Its closed and failed trades, pick, rows and counts."""
+    from collections import defaultdict
+    from lab.pumpfun_rt import early as EA, exitpol as XP, labels_r2 as L2, pipeline as P, realistic as R
+    from lab.pumpfun_rt import selfeat as SF, selmodel as SM, socialfeat as SO, study, wallets as W
+    from lab.pumpfun_rt.categorize import CategoryIndex
+    from lab.pumpfun_rt.tokens import CreatorBook
+    cats = CategoryIndex.load(root / "categories")
+    e1 = sim.Engine(S.RULES, book=CreatorBook(), decisions=True, entry_until=split, wallets=W.WalletBook(), cats=cats,
+                    early_rows=True, snipers=EA.SniperBook(), select=True, trend=True, social=SO.warm([], root))
+    real = R.Model()
+    lab1 = e1.add_pipe(L2.RealLabelPipe(e1, real))
+    sim.replay(days, e1, root, until_ms=split + 45 * 60_000)
+    by = defaultdict(list)
+    for t in e1.closed:
+        if t["signal_ms"] < split:
+            by[t["rule"]].append(t)
+    cands = [(study.trade_stats(v)["mean"], study.trade_stats(v)["pnl_sol"], r) for r, v in by.items()
+             if len(v) >= study.MIN_IS_TRADES]
+    pick = max(cands)[2] if cands else S.DEFAULT_PICK
+    mods = M.train_all(e1.table(), until_ms=split)
+    try:
+        mods.update(XP.fit_live(e1.early.tables(), until_ms=split, log=lambda *a: None))
+    except Exception:
+        pass
+    try:
+        mods.update(SM.train(lab1.table(), until_ms=split))
+    except Exception:
+        pass
+    base, rules, costs, strats = C.Costs(), list(S.RULES), {}, list(P.STRATEGIES)
+    for r in S.RULES:
+        for suffix, c in (("lat2x", base.scaled(latency=2.0)), ("prio3x", base.scaled(priority=3.0))):
+            rules.append(sim.variant(r, suffix))
+            costs[rules[-1].name] = c
+    rules.append(sim.model_rule(S.BY_NAME[pick]))
+    for s in P.STRATEGIES:
+        for suffix, c in (("lat2x", base.scaled(latency=2.0)), ("prio3x", base.scaled(priority=3.0))):
+            strats.append(P.variant(s, suffix))
+            costs[strats[-1].name] = c
+    e2 = sim.Engine(rules, book=CreatorBook(), decisions=True, model=M.Filter(mods), rule_costs=costs,
+                    strategies=strats, wallets=W.WalletBook(), cats=cats, models=mods, early_rows=True,
+                    snipers=EA.SniperBook(), select=True, trend=True, social=SO.warm([], root))
+    e2.early.keep_frac = min(1.0, study.X14_KEEP_DAYS / max(1, len(days)))
+    lab2 = e2.add_pipe(SF.LabelPipe(e2, study.select_costs()))
+    lab2r = e2.add_pipe(L2.RealLabelPipe(e2, real))
+    e2.r2 = L2.Labels(e2, real)
+    sim.replay(days, e2, root)
+    return {"pick": pick, "closed": e2.closed, "failed": e2.failed, "skipped": e2.skipped, "counts": e2.counts,
+            "table": e2.table(), "select": lab2r.table(), "ideal": lab2.table(), "x14": e2.early.tables()["rows"],
+            "pass1": e1.counts}
+
+
+def same_columns(a: dict, b: dict) -> bool:
+    return set(a) == set(b) and all(np.array_equal(a[k], b[k], equal_nan=True) for k in a)
+
+
+def test_the_study_replays_once_and_gives_the_two_passes_numbers(tmp_path, monkeypatch):
+    """2026-10-29: the model-free part of pass 2 in one engine, pass 1 and the model half in another process, give
+    what the two full passes gave: the pick, every rule's and strategy's trades in and out of sample, the
+    stress twins, the failed buys, the skips, the decision rows, Y9's and R2's rows, X14's rows and the counts."""
+    synth_store(tmp_path, hours=10)
+    monkeypatch.setattr(store, "base", lambda: tmp_path)
+    monkeypatch.setattr("lab.pumpfun_rt.study.WARM_DAYS", 0)
+    from lab.pumpfun_rt import pipeline as P
+    from lab.pumpfun_rt import study
+    now = T0 + 3 * 86_400_000
+    res = study.run(now_ms=now, root=tmp_path, log=lambda *a: None, shadow={})
+    ref = two_pass(tmp_path, res["days"], res["split_ms"])
+    assert res["pick"] == ref["pick"]
+    by = {}
+    for t in ref["closed"]:
+        by.setdefault(t["rule"], {"is": [], "oos": []})["oos" if t["signal_ms"] >= res["split_ms"] else "is"].append(t)
+    traded = 0
+    for r in res["results"]:
+        want = by.get(r["rule"], {"is": [], "oos": []})
+        fails = [f for f in ref["failed"] if f["rule"] == r["rule"] and f["signal_ms"] >= res["split_ms"]]
+        assert {k: v for k, v in r["stats"].items() if k != "diff_band"} == study.trade_stats(want["oos"], fails), \
+            r["rule"]
+        assert (r["is_stats"]["n"], r["is_stats"]["pnl_sol"]) == (len(want["is"]),
+                                                                 study.trade_stats(want["is"])["pnl_sol"]
+                                                                 + sum(f["pnl_sol"] for f in ref["failed"]
+                                                                       if f["rule"] == r["rule"]
+                                                                       and f["signal_ms"] < res["split_ms"]))
+        for s, st in (r.get("stress") or {}).items():
+            assert st == study.trade_stats(by.get(f"{r['rule']}@{s}", {"oos": []})["oos"]), (r["rule"], s)
+        traded += r["stats"]["n"] + r["is_stats"]["n"]
+    assert traded > 0 and any(r["stats"]["n"] for r in res["results"] if r.get("pipeline")), "strategies traded"
+    assert same_columns(res["table"], ref["table"]) and len(res["table"]["t"]) > 0
+    assert same_columns(res["select_rows"], ref["select"]) and same_columns(res["select_rows_ideal"], ref["ideal"])
+    assert same_columns(res["x14"]["rows"], ref["x14"])
+    assert res["skipped"] == {f"{k[0]}: {k[1]}": v for k, v in ref["skipped"].items() if "@" not in k[0]}
+    assert res["counts"]["pass2"] == dict(ref["counts"])
+    assert res["counts"]["pass1"] == dict(ref["pass1"])
+    seq = study.run(now_ms=now, root=tmp_path, log=lambda *a: None, shadow={}, parallel=False)
+    assert [r["stats"] for r in seq["results"]] == [r["stats"] for r in res["results"]], "in one process the same"
+    assert len(P.STRATEGIES) and len(res["results"]) == len(S.RULES) + 1 + len(P.STRATEGIES)
+
+
+def test_the_model_half_asks_each_row_once_and_gets_the_same_numbers():
+    from lab.pumpfun_rt import study
+    calls = []
+
+    class Booster:
+        def predict(self, X, raw_score=False):
+            calls.append(X.copy())
+            return X.sum(axis=1) * (2.0 if raw_score else 1.0)
+    m = study._Memo(Booster())
+    a, b = np.array([[1.0, np.nan]]), np.array([[2.0, 3.0]])
+    assert np.array_equal(m.predict(a), Booster().predict(a), equal_nan=True) and len(calls) == 2
+    calls.clear()
+    out = [float(m.predict(x)[0]) for x in (b, b.copy(), b, a)]
+    assert out[:3] == [5.0] * 3 and len(calls) == 1, "a row asked again is answered from memory"
+    assert float(m.predict(b, raw_score=True)[0]) == 10.0 and len(calls) == 2, "other questions go to the booster"
+    two = np.vstack([b, b])
+    assert list(m.predict(two)) == [5.0, 5.0] and len(calls) == 3
+    m.predict(b)[0] = -1
+    assert float(m.predict(b)[0]) == 5.0, "the remembered answer cannot be changed by a caller"
+    monkey = study._Memo(Booster())
+    monkey.MAX = 2
+    for i in range(5):
+        monkey.predict(np.array([[float(i), 0.0]]))
+    assert len(monkey.seen) <= 2, "bounded"
+
+
 def test_the_winner_card_in_english_and_german():
     from lab.pumpfun_rt import live
     rec = {"rule": "C_20in60_x1", "mint": MINT, "symbol": "TST", "ret": 2.5, "proceeds_sol": 0.35, "hold_s": 42,

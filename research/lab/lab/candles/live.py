@@ -16,10 +16,14 @@ recorder has received a minute past their end; open/high/low/close by exchange t
 volume, trades, the buy side (Kraken's side is the taker's) as taker buy volume, VWAP. The minutes stay in
 the store when the recorder's retention removes the raw trades.
 
-GeckoTerminal (polite: one call per gecko_gap_s, gecko_calls_per_run a run, a 429 ends the run's calls to
-it and backs it off 2 minutes, doubling to 30, while 429s go on): the pool of a token is the deepest against USDC or SOL, looked up every pool_refresh_days; the pools'
-liquidity in one /pools/multi call a run, put on the newest closed bar; each run asks for the bars since
-the newest stored, then walks the 1h history back gecko_hour_days (the keyless API's reach). Mints: the
+GeckoTerminal (polite: one call per gecko_gap_s, gecko_calls_per_run calls and gecko_run_s seconds a run; a
+429 waits once, Retry-After or at most gecko_retry_s, the next ends the run's calls to it and backs it off 2
+minutes, doubling to 30, while 429s go on): the pool of a token is the deepest against USDC or SOL, looked up
+every pool_refresh_days; the pools' liquidity in one /pools/multi call a run, put on the newest closed bar;
+then the work, pool timeframes (1h, 1d) without a bar first, then what the last run left (the cursor,
+<write root>/candles/gecko_cursor.json), then the stalest, each asking for the bars since the newest stored,
+and last the 1h history walked back gecko_hour_days (the keyless API's reach). The work a run does not reach
+stays in the cursor for the next; the output line says pools fetched, pools left and why it stopped. Mints: the
 coins' from lab.onchain.mints, the tokens' from results/smallaccount_s2_tokens.csv (S2's list).
 Yahoo: v8 chart, 1d from yahoo_from, 1h the last yahoo_1h_days; a daily bar is complete from the next UTC
 midnight. Settings in lab/candles/markets.json. State: <write root>/candles/state.json.
@@ -49,6 +53,7 @@ YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{}?period1={}&period2
 TOKENS_CSV = Path(__file__).resolve().parents[2] / "results" / "smallaccount_s2_tokens.csv"
 GECKO_TF = {"1h": "hour", "1d": "day"}
 BACKOFF_MIN_S, BACKOFF_MAX_S = 120, 1800
+CURSOR = "gecko_cursor.json"
 
 
 class RateLimited(OSError):
@@ -56,38 +61,49 @@ class RateLimited(OSError):
 
 
 class Http:
-    """GET JSON with a minimum gap and a call budget per host; a 429 blocks the host for the rest of the run."""
+    """GET JSON with a minimum gap and a call budget per host; a 429 waits once (Retry-After, at most the host's
+    retry_429 seconds, none without one) and asks again, the next blocks the host for the rest of the run."""
 
     def __init__(self, gaps: dict[str, float] | None = None, budgets: dict[str, int] | None = None,
-                 sleep=time.sleep, clock=time.monotonic, opener=None):
-        self.gaps, self.budgets = gaps or {}, budgets or {}
+                 sleep=None, clock=None, opener=None, retry_429: dict[str, float] | None = None):
+        self.gaps, self.budgets, self.retry_429 = gaps or {}, budgets or {}, retry_429 or {}
         self.calls: dict[str, int] = {}
         self.last: dict[str, float] = {}
         self.blocked: set[str] = set()
-        self.sleep, self.clock = sleep, clock
+        self.retried: set[str] = set()
+        self.sleep, self.clock = sleep or time.sleep, clock or time.monotonic
         self.opener = opener or urllib.request.urlopen
 
     def __call__(self, url: str):
         host = url.split("/")[2]
         if host in self.blocked:
             raise RateLimited(f"{host} rate limited in this run")
-        if self.calls.get(host, 0) >= self.budgets.get(host, 10**9):
-            raise RateLimited(f"{host}: this run's budget is spent")
-        wait = self.last.get(host, -1e9) + self.gaps.get(host, 0.0) - self.clock()
-        if wait > 0:
-            self.sleep(wait)
-        self.last[host] = self.clock()
-        self.calls[host] = self.calls.get(host, 0) + 1
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (pythia-lab candles, read only)",
-                                                   "Accept": "application/json"})
-        try:
-            with self.opener(req, timeout=30) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            if e.code in (418, 429):
-                self.blocked.add(host)
-                raise RateLimited(f"{host} HTTP {e.code}") from e
-            raise
+        while True:
+            if self.calls.get(host, 0) >= self.budgets.get(host, 10**9):
+                raise RateLimited(f"{host}: this run's budget is spent")
+            wait = self.last.get(host, -1e9) + self.gaps.get(host, 0.0) - self.clock()
+            if wait > 0:
+                self.sleep(wait)
+            self.last[host] = self.clock()
+            self.calls[host] = self.calls.get(host, 0) + 1
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (pythia-lab candles, read only)",
+                                                       "Accept": "application/json"})
+            try:
+                with self.opener(req, timeout=30) as r:
+                    return json.loads(r.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                if e.code not in (418, 429):
+                    raise
+                cap = float(self.retry_429.get(host, 0))
+                if e.code == 418 or host in self.retried or cap <= 0:
+                    self.blocked.add(host)
+                    raise RateLimited(f"{host} HTTP {e.code}" + (" after one backoff" if host in self.retried else "")) from e
+                try:
+                    secs = float((e.headers or {}).get("Retry-After") or cap)
+                except (TypeError, ValueError):                     # an HTTP date: the cap
+                    secs = cap
+                self.retried.add(host)
+                self.sleep(min(max(secs, 1.0), cap))
 
 
 def load_state(root: Path | None = None) -> dict:
@@ -101,6 +117,20 @@ def load_state(root: Path | None = None) -> dict:
 
 def save_state(st: dict, root: Path | None = None) -> None:
     S._write_json(S.out_dir(root) / "state.json", st)
+
+
+def load_cursor(root: Path | None = None) -> dict:
+    """GeckoTerminal's work the last run left: {left: ["1h/SOL", "1d/WIF", "back/JUP", ...], stopped, at_us}."""
+    for base in reversed(S.store_dirs(root)):
+        try:
+            return json.loads((base / CURSOR).read_text())
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
+def save_cursor(cur: dict, root: Path | None = None) -> None:
+    S._write_json(S.out_dir(root) / CURSOR, cur)
 
 
 def _last_end(source: str, asset: str, tf: str, root: Path | None = None) -> int:
@@ -307,14 +337,34 @@ def _ohlcv_url(pool: dict, tf: str, limit: int, before: int | None = None) -> st
             f"&token={pool['side']}" + (f"&before_timestamp={before}" if before else ""))
 
 
+def gecko_work(due: dict[str, int], back: list[str], left: list[str], now: int) -> list[str]:
+    """The run's work in order: pool timeframes without a bar first, then what the last run left in its order,
+    then the stalest (in bars behind); the 1h history walks back last."""
+    pos = {k: i for i, k in enumerate(left)}
+
+    def key(k: str):
+        if k.startswith("back/"):
+            return (2, pos.get(k, len(pos)), 0.0)
+        last = due[k]
+        return (1 if last else 0, pos.get(k, len(pos)), -(now - last) / S.TF[k.split("/")[0]] if last else 0.0)
+    return sorted(list(due) + back, key=key)
+
+
 def run_gecko(get, cfg: dict, state: dict, now: int, root: Path | None = None, tokens_csv: Path = TOKENS_CSV) -> dict:
+    """One run: pools of new tokens, the pools' liquidity, then the work of gecko_work until the run's time
+    (gecko_run_s) or call budget is spent or a 429 survives one wait; the work left goes to the cursor file."""
     gs = state.setdefault("gecko", {"pools": {}, "backfilled": {}})
     pools, done = gs["pools"], gs["backfilled"]
-    errors, rows = [], 0
+    errors, rows, fetched, stopped = [], 0, [], None
+    cur = load_cursor(root)
     bo = gs.get("backoff") or {}
     if now < int(bo.get("until_us") or 0):
-        return {"rows": 0, "pools": len(pools), "errors": [f"gecko backing off for {bo.get('secs')} s after a 429"]}
+        return {"rows": 0, "pools": len(pools), "fetched": [], "left": list(cur.get("left") or []), "stopped": "backoff",
+                "errors": [f"gecko backing off for {bo.get('secs')} s after a 429"]}
+    clock = getattr(get, "clock", time.monotonic)
+    deadline = clock() + float(cfg.get("gecko_run_s", 300))
     ms = mints(cfg, tokens_csv)
+    todo: list[str] = []
 
     def lookup(due) -> None:
         """The pools a token's due(pool or None) asks for, its deepest against USDC or SOL."""
@@ -324,49 +374,83 @@ def run_gecko(get, cfg: dict, state: dict, now: int, root: Path | None = None, t
                 if best:
                     pools[a] = {**best, "at_us": now}
 
+    def bars(tf: str, a: str, last: int, liq: float | None) -> int:
+        """The bars since the newest stored."""
+        limit = 1000 if not last else int(min(1000, (now - last) // S.TF[tf] + 2))
+        return S.write("gecko", a, tf, gecko_rows(get(_ohlcv_url(pools[a], tf, limit)), tf, now, liq), now, root)
+
+    def backfill(a: str) -> int | None:
+        """One step of the 1h history back, as far as the API goes (None: nothing to ask)."""
+        first = _first_open("gecko", a, "1h", root)
+        if not first:
+            return None
+        if first <= now - cfg.get("gecko_hour_days", 180) * DAY:
+            done[a] = True
+            return None
+        r = gecko_rows(get(_ohlcv_url(pools[a], "1h", 1000, first // 1_000_000)), "1h", now)
+        r = r.filter(pl.col("open_time_us") < first)
+        if not r.height:
+            done[a] = True
+        return S.write("gecko", a, "1h", r, now, root)
+
     try:
         lookup(lambda p: not p)                                     # new tokens first: no bars without a pool
         live = [a for a in ms if a in pools]
-        due = [(tf, a, _last_end("gecko", a, tf, root)) for tf in ("1h", "1d") for a in live]
-        due = [(tf, a, last) for tf, a, last in due if not last or now - last >= S.TF[tf]]
+        due = {f"{tf}/{a}": _last_end("gecko", a, tf, root) for tf in ("1h", "1d") for a in live}
+        due = {k: last for k, last in due.items() if not last or now - last >= S.TF[k.split("/")[0]]}
+        todo = gecko_work(due, [f"back/{a}" for a in live if not done.get(a)], list(cur.get("left") or []), now)
         liq = {}
-        hourly = [a for tf, a, _ in due if tf == "1h"]
+        hourly = [k.split("/")[1] for k in todo if k.startswith("1h/")]
         for i in range(0, len(hourly), 30):                         # the pools' liquidity now, one call per 30
             chunk = hourly[i:i + 30]
             ans = get(f"{GECKO}/pools/multi/{','.join(pools[a]['pool'] for a in chunk)}") or {}
             by = {(x.get("attributes") or {}).get("address"): float((x.get("attributes") or {}).get("reserve_in_usd") or 0)
                   for x in ans.get("data") or []}
             liq.update({a: by.get(pools[a]["pool"]) for a in chunk})
-        for tf, a, last in due:                                     # the bars since the newest stored
-            limit = 1000 if not last else int(min(1000, (now - last) // S.TF[tf] + 2))
-            r = gecko_rows(get(_ohlcv_url(pools[a], tf, limit)), tf, now, liq.get(a) if tf == "1h" else None)
-            rows += S.write("gecko", a, tf, r, now, root)
-        refresh = cfg.get("pool_refresh_days", 7) * DAY             # known pools again every few days, after the bars
-        lookup(lambda p: p is not None and now - int(p.get("at_us") or 0) >= refresh)
-        for a in live:                                              # the 1h history, back as far as the API goes
-            if done.get(a):
-                continue
-            first = _first_open("gecko", a, "1h", root)
-            if not first:
-                continue
-            if first <= now - cfg.get("gecko_hour_days", 180) * DAY:
-                done[a] = True
-                continue
-            r = gecko_rows(get(_ohlcv_url(pools[a], "1h", 1000, first // 1_000_000)), "1h", now)
-            r = r.filter(pl.col("open_time_us") < first)
-            if not r.height:
-                done[a] = True
-                continue
-            rows += S.write("gecko", a, "1h", r, now, root)
+        while todo:
+            if clock() >= deadline:
+                stopped = "the run's time budget"
+                break
+            k = todo[0]
+            kind, a = k.split("/")
+            try:
+                n = backfill(a) if kind == "back" else bars(kind, a, due[k], liq.get(a) if kind == "1h" else None)
+            except RateLimited:
+                raise
+            except (OSError, ValueError) as e:                      # one pool failing does not end the run
+                errors.append(f"gecko {k}: {e}")
+                n = None
+            todo.pop(0)
+            if n is not None:
+                rows += n
+                fetched.append(k)
+        if not stopped:
+            refresh = cfg.get("pool_refresh_days", 7) * DAY         # known pools again every few days, after the bars
+            lookup(lambda p: p is not None and now - int(p.get("at_us") or 0) >= refresh)
         gs.pop("backoff", None)
     except RateLimited as e:
         errors.append(str(e))
+        stopped = "HTTP 429" if "HTTP" in str(e) else "the run's call budget"
         if "HTTP" in str(e):                                        # 2 minutes, doubling up to 30 after each 429
             secs = min(BACKOFF_MAX_S, max(BACKOFF_MIN_S, 2 * int(bo.get("secs") or 0)))
             gs["backoff"] = {"secs": secs, "until_us": now + secs * 1_000_000}
     except (OSError, ValueError) as e:
         errors.append(f"gecko: {e}")
-    return {"rows": rows, "pools": len(pools), "errors": errors}
+        stopped = "an error"
+    save_cursor({"left": todo, "stopped": stopped, "at_us": now}, root)
+    return {"rows": rows, "pools": len(pools), "fetched": fetched, "left": todo, "stopped": stopped, "errors": errors}
+
+
+def gecko_said(g: dict) -> str:
+    """The run in one plain line: pools fetched, pools left, stopped or not."""
+    pools = lambda ks: len({k.split("/")[1] for k in ks})
+    left = g.get("left") or []
+    out = (f"gecko: {pools(g.get('fetched') or [])} pools fetched ({len(g.get('fetched') or [])} pool timeframes or "
+           f"history steps, {g.get('rows', 0)} bars), {pools(left)} pools left ({len(left)} items"
+           + (f": {', '.join(left[:6])}{', ...' if len(left) > 6 else ''}" if left else "") + ")")
+    if g.get("stopped") == "backoff":
+        return out + ", not run: backing off after a 429"
+    return out + (f", stopped on {g['stopped']}, cursor saved" if g.get("stopped") else ", not stopped")
 
 
 # ---------------------------------------------------------------- Yahoo
@@ -439,12 +523,17 @@ def run_live(get=None, now: int | None = None, root: Path | None = None) -> dict
 def run_markets(get=None, now: int | None = None, root: Path | None = None, tokens_csv: Path = TOKENS_CSV) -> dict:
     cfg, now = S.config(), now or S.now_us()
     get = get or Http(gaps={"api.geckoterminal.com": float(cfg.get("gecko_gap_s", 6.0)), "query1.finance.yahoo.com": 1.0},
-                      budgets={"api.geckoterminal.com": int(cfg.get("gecko_calls_per_run", 40))})
+                      budgets={"api.geckoterminal.com": int(cfg.get("gecko_calls_per_run", 40))},
+                      retry_429={"api.geckoterminal.com": float(cfg.get("gecko_retry_s", 60))})
     state = load_state(root)
     g = run_gecko(get, cfg, state, now, root, tokens_csv)
     y = run_yahoo(get, cfg, state, now, root)
     state.setdefault("runs", {})["markets"] = {"at_us": now, "gecko": g["rows"], "pools": g["pools"],
-                                               "yahoo": y["rows"], "errors": (g["errors"] + y["errors"])[:5]}
+                                               "gecko_fetched": len(g["fetched"]), "gecko_left": len(g["left"]),
+                                               "gecko_stopped": g["stopped"], "yahoo": y["rows"],
+                                               "said": gecko_said(g) + f"; yahoo: {y['rows']} bars"
+                                               + (", skipped (not due)" if y.get("skipped") else ""),
+                                               "errors": (g["errors"] + y["errors"])[:5]}
     save_state(state, root)
     return state["runs"]["markets"]
 
@@ -454,7 +543,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("command", choices=["live", "markets"])
     a = ap.parse_args(argv)
     res = run_live() if a.command == "live" else run_markets()
-    print(json.dumps(res, sort_keys=True))
+    print((res["said"] + "  " if "said" in res else "") + json.dumps(res, sort_keys=True))
     return 0
 
 

@@ -7,7 +7,7 @@ Hourly on the lab machine (see research/ops/README.md):
 
   python -m lab.collect.cs2                 Skinport items + sales history + Steam watchlist
   python -m lab.collect.cs2 --no-steam      Skinport only
-  python -m lab.collect.cs2 --steam-max 40  fewer Steam requests this run
+  python -m lab.collect.cs2 --steam-max 5   fewer Steam requests this run
   python -m lab.collect.cs2 --steam-market  only the daily Steam market snapshot (csgotrader, below);
                                             --force stores it again for a day already stored
 
@@ -17,14 +17,25 @@ Sources, all public and keyless:
             Brotli only (Accept-Encoding: br). Limit 8 requests per 5 minutes;
             this job makes 2 an hour.
   Steam     GET https://steamcommunity.com/market/priceoverview/?appid=730&currency=3&market_hash_name=...
-            About 20 requests a minute: one every 3.2 s, at most --steam-max a
-            run (default 100). A 429 waits (Retry-After, else 60 s, then
-            120 s) and a third one ends the Steam part of the run; the
-            watchlist then resumes where it stopped next hour. In October
-            2026 Steam answered every request from the lab with 429 (it
-            filters the client). That is left as it is: no other user agent,
-            no proxies, nothing that works around the filter. After a refused
-            run the next one knocks once and stops.
+            One request every 3.2 s, a small batch a run (--steam-max, default
+            15), rotating through the watchlist: the cursor in
+            steam_state.json says where the next run starts, so every item
+            gets its turn (90 items, 6 runs). A 429 waits once (Retry-After,
+            else 60 s) and a second one ends the Steam part of the run; a run
+            after a cool-down knocks once and stops at the first 429. A
+            refused run starts a cool-down in steam_state.json, 1 h, doubling
+            up to 12 h, reset by the first run that gets prices; until it
+            expires the runs skip Steam and say so ("steam refused (429),
+            cooling down until ..."). In October 2026 Steam answered every
+            request from the lab with 429 (it filters the client); 320 runs
+            ended ok with steam_ok 0. That is left as it is: no other user
+            agent, no proxies, nothing that works around the filter.
+            Exit code: 1 when Steam was asked and gave no price (after the
+            Skinport files are written), so the job turns red on the hours
+            Steam is tried and refused; a run that skips Steam for the
+            cool-down prints the refused line and exits 0 when Skinport is
+            fine, so cs2-run (depends_on cs2-collect) keeps the Skinport
+            board and alerts going between the knocks.
   Steam market, aggregated (daily, --steam-market)
             GET https://prices.csgotrader.app/latest/steam.json
             GET https://prices.csgotrader.app/latest/exchange_rates.json
@@ -49,6 +60,7 @@ Writes under <data>/cs2/ (PYTHIA_DATA, as the rest of the lab):
                                                 every item, with the day's EUR per USD; dated by the
                                                 source file's Last-Modified day
   collector.json                                the last run: counts, errors, where the watchlist stopped
+  steam_state.json                              the Steam cursor and cool-down (until, length, refusals in a row)
   steam_market.json                             the last --steam-market run
 """
 
@@ -79,8 +91,9 @@ USER_AGENT = "pythia-lab-cs2/1.0 (hourly price snapshots, read-only)"
 WATCHLIST = Path(__file__).with_name("cs2_watchlist.json")
 
 STEAM_INTERVAL_S = 3.2       # 60 / 3.2 = 18.75 requests a minute, under Steam's ~20
-STEAM_MAX_PER_RUN = 100
-STEAM_BACKOFF_S = (60, 120)  # waits after the first and second 429; the third stops the run
+STEAM_MAX_PER_RUN = 15       # a small batch an hour; the cursor rotates through the watchlist
+STEAM_BACKOFF_S = (60,)      # wait after the first 429; the second stops the run
+STEAM_COOLDOWN_S = (3_600, 43_200)  # a refused run skips Steam for 1 h, doubling up to 12 h
 TOP_LIQUID = 40              # most traded Skinport items added to the Steam watchlist
 
 # fetch(url, headers) -> (status, body bytes, response headers)
@@ -414,6 +427,20 @@ def daily_skinport(items: pl.DataFrame, sales: pl.DataFrame | None) -> pl.DataFr
         ts_ms=pl.col("ts_ms").fill_null(items["ts_ms"].max()))
 
 
+def steam_state(base: Path, prev: dict) -> dict:
+    """steam_state.json, else what an older collector.json had (the cursor, a refused last run)."""
+    st = market_json(base / "steam_state.json")
+    if isinstance(st, dict):
+        return st
+    refused = bool(prev.get("steam_rate_limited")) and not prev.get("steam_ok")
+    return {"cursor": int(prev.get("steam_cursor") or 0), "cooldown_s": STEAM_COOLDOWN_S[0] // 2 if refused else 0,
+            "until_ms": 0, "refusals": 1 if refused else 0}
+
+
+def _utc(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+
 def merge_daily_steam(path: Path, rows: pl.DataFrame) -> pl.DataFrame:
     """Today's Steam file gains this run's rows; a later price replaces an earlier one per item."""
     ok = rows.filter(pl.col("ok"))
@@ -451,13 +478,21 @@ def run(root: Path | None = None, fetch: Fetch = http_fetch, steam: bool = True,
     if items is not None:
         _write(daily_skinport(items, sales), base / "daily" / "skinport" / f"date={day}.parquet")
 
-    cursor = int(prev.get("steam_cursor") or 0)
-    if steam:
+    st = steam_state(base, prev)
+    cursor = int(st.get("cursor") or 0)
+    until = int(st.get("until_ms") or 0)
+    report["steam_failed"] = False
+    if steam and now_ms < until:
+        # Refused not long ago: no request this run, and it says so.
+        report.update(steam_requested=0, steam_ok=0, steam_rate_limited=False, steam_cooling=True,
+                      steam_skipped=True, steam_cooldown_until=_utc(until))
+        report["errors"].append(f"steam refused (429), cooling down until {_utc(until)}")
+    elif steam:
         names = steam_names(load_watchlist(), sales)
         batch, nxt = rotate(names, cursor, steam_max)
-        # After a run that Steam refused outright, this run only knocks once:
+        # After a refused run (a cool-down behind it) this run only knocks once:
         # the first 429 ends the Steam part at once instead of waiting it out.
-        cooling = bool(prev.get("steam_rate_limited")) and not prev.get("steam_ok")
+        cooling = int(st.get("cooldown_s") or 0) > 0
         rows, done, limited = fetch_steam(fetch, batch, now_ms, sleep=sleep,
                                           backoff=() if cooling else STEAM_BACKOFF_S)
         cursor = (cursor + done) % max(len(names), 1)
@@ -469,16 +504,30 @@ def run(root: Path | None = None, fetch: Fetch = http_fetch, steam: bool = True,
             daily_path = base / "daily" / "steam" / f"date={day}.parquet"
             _write(merge_daily_steam(daily_path, df), daily_path)
         missing = [r["name"] for r in rows if r["status"] == 200 and not r["ok"]]
-        report.update(steam_requested=len(batch), steam_ok=int(df["ok"].sum()) if not df.is_empty() else 0,
-                      steam_rate_limited=limited, steam_missing=missing[:20], steam_watchlist=len(names),
-                      steam_cooling=cooling)
+        n_ok = int(df["ok"].sum()) if not df.is_empty() else 0
+        report.update(steam_requested=len(batch), steam_ok=n_ok, steam_rate_limited=limited,
+                      steam_missing=missing[:20], steam_watchlist=len(names), steam_cooling=cooling)
         if limited:
-            report["errors"].append("steam: refused (429) after one try, cooling off" if cooling
-                                    else "steam: rate limited three times, stopped early")
+            # Refused: the next runs skip Steam, 1 h, then twice as long each time, up to 12 h.
+            lo, hi = STEAM_COOLDOWN_S
+            wait = min(hi, max(lo, 2 * int(st.get("cooldown_s") or 0)))
+            st.update(cooldown_s=wait, until_ms=now_ms + wait * 1000, refusals=int(st.get("refusals") or 0) + 1)
+            report["steam_cooldown_until"] = _utc(st["until_ms"])
+            report["errors"].append(f"steam refused (429), cooling down until {_utc(st['until_ms'])}"
+                                    f" ({wait // 3600} h, refused {st['refusals']} run{'s' if st['refusals'] > 1 else ''} in a row)")
+        elif n_ok:
+            st.update(cooldown_s=0, until_ms=0, refusals=0)
+        if batch and not n_ok:
+            # Asked and nothing came back: the run fails (Skinport is already written).
+            report["steam_failed"] = True
+            if not limited:
+                report["errors"].append(f"steam: 0 of {len(batch)} prices came back")
+    st["cursor"] = cursor
     report["steam_cursor"] = cursor
     report["ok"] = items is not None and sales is not None
     base.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    (base / "steam_state.json").write_text(json.dumps(st, indent=2), encoding="utf-8")
     return report
 
 
@@ -492,8 +541,12 @@ def main(argv: list[str] | None = None) -> int:
     if "--steam-max" in argv:
         steam_max = int(argv[argv.index("--steam-max") + 1])
     rep = run(steam="--no-steam" not in argv, steam_max=steam_max)
+    for e in rep["errors"]:
+        print(e)
     print(json.dumps(rep, indent=2))
-    return 0 if rep["ok"] else 1
+    # Skinport missing, or Steam asked and no price back: red. A run that
+    # skips Steam for the cool-down is not, so cs2-run still runs on Skinport.
+    return 0 if rep["ok"] and not rep["steam_failed"] else 1
 
 
 if __name__ == "__main__":

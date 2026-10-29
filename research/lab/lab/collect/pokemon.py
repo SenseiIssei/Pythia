@@ -35,6 +35,9 @@ Lake (under $PYTHIA_DATA/pokemon):
   _cache/YYYY-MM-DD/                    raw pages, so a rerun the same day
                                         continues instead of starting over;
                                         cleared after three days
+  _cursor.json                          the snapshot being fetched: its date
+                                        and the pages done per source and
+                                        query; removed once it is written
 
 Politeness: keyless the API allows about 30 requests a minute, so pages are
 spaced 2.1 s apart (0.3 s with a key); 429 and 5xx answers are retried with
@@ -46,10 +49,26 @@ retries, so a keyless run took about 40 minutes. A run that still fails is
 tried again (--attempts, default 3, --pause 300 s) and continues from the day
 cache. If /sets never answers, the sets are rebuilt from the cards.
 
+Resume: runs took 4,500 to 6,600 s in October 2026 against the job's 2 h, and
+a run the timeout kills left its pages in a cache dated that day, so the next
+day began again at page 1. The cursor (_cursor.json) is written after every
+card page and every TCGplayer group; a run that finds yesterday's snapshot
+unfinished (RESUME_DAYS) first finishes it under its own date from the pages
+cached then, then takes today's. A query that changed (fields, page size)
+starts over. Prices of that snapshot are read a day apart at most.
+
 Freshness: TCGplayer prices are refreshed daily. The API stopped refreshing
 Cardmarket for most cards in mid 2026; a Cardmarket block older than 14 days
 (CM_FRESH_DAYS) is kept in the lake for the record but counts for nothing
 (see `fresh`). meta/<date>.json records how fresh both sources were.
+
+Stale sources: `stale_sources` names every price source whose newest price is
+older than STALE_DAYS (TCGplayer and Cardmarket through the API, TCGplayer's
+dumps through tcgcsv.com; meta "stale" and the report carry the line) and
+says the job is red only when none of them has a price that recent: one
+stale source (Cardmarket since 2026-07-01) is named, not red. The collector
+only logs it and exits 0 so that lab.pokemon.daily (chained with &&) still
+runs on the old prices; daily exits 1 with the line when it is red.
 
   python -m lab.collect.pokemon                 today's snapshot
   python -m lab.collect.pokemon --sealed        plus sealed product
@@ -88,6 +107,11 @@ MIN_USD = 2.0
 CM_FRESH_DAYS = 14
 TP_FRESH_DAYS = 7
 CACHE_DAYS = 3
+# A source whose newest price is older than this makes the job red (see `stale_sources`).
+STALE_DAYS = 3
+# An unfinished snapshot at most this many days old is finished before today's.
+RESUME_DAYS = 1
+CURSOR = "_cursor.json"
 USER_AGENT = "pythia-lab-collector (data only)"
 CARD_FIELDS = ("id,name,supertype,subtypes,types,hp,attacks,abilities,number,rarity,artist,"
                "nationalPokedexNumbers,set,images,tcgplayer,cardmarket")
@@ -353,6 +377,62 @@ def freshness(rows: list[dict], snap: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------- resume
+
+@dataclass
+class Cursor:
+    """The pages done per source of one snapshot, in <lake>/_cursor.json. A
+    page is marked once it is in the day cache, so a retry or the next run
+    reads pages up to the cursor from there and asks the network only for the
+    rest. `path` None keeps it in memory (dry runs, --max-pages)."""
+    path: Path | None
+    snap: str
+    pages: dict = field(default_factory=dict)
+
+    @classmethod
+    def load(cls, path: Path | None, snap: str) -> "Cursor":
+        d = read_cursor(path) if path is not None else {}
+        return cls(path, snap, dict(d.get("pages") or {}) if d.get("date") == snap else {})
+
+    def done(self, source: str, query: str) -> int:
+        e = self.pages.get(source) or {}
+        return int(e.get("page") or 0) if e.get("query") == query else 0
+
+    def mark(self, source: str, query: str, page: int) -> None:
+        self.pages[source] = {"query": query, "page": page}
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps({"date": self.snap, "pages": self.pages}), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def reset(self) -> None:
+        """The snapshot is written: the next run starts a new one at page 1."""
+        self.pages = {}
+        if self.path is not None:
+            self.path.unlink(missing_ok=True)
+
+
+def read_cursor(path: Path) -> dict:
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def pending_snapshot(root: Path, today: str) -> str | None:
+    """The date of an unfinished snapshot from the last RESUME_DAYS days whose
+    pages are still cached, to be finished before today's; None if there is none."""
+    snap = read_cursor(root / CURSOR).get("date")
+    try:
+        age = (date.fromisoformat(today) - date.fromisoformat(str(snap))).days
+    except ValueError:
+        return None
+    return snap if 0 < age <= RESUME_DAYS and (root / "_cache" / snap).is_dir() else None
+
+
 # ---------------------------------------------------------------- fetching
 
 def fetch_sets(client: Client) -> list[dict]:
@@ -367,9 +447,14 @@ def fetch_sets(client: Client) -> list[dict]:
         page += 1
 
 
-def fetch_cards(client: Client, max_pages: int | None = None, log=print):
-    """Yield every card, page by page (oldest set first, stable order)."""
+def fetch_cards(client: Client, max_pages: int | None = None, log=print, cursor: Cursor | None = None):
+    """Yield every card, page by page (oldest set first, stable order). Pages
+    up to the cursor come from the day cache; each new page moves it on."""
     page, seen = 1, 0
+    key = urllib.parse.urlencode({"pageSize": PAGE_SIZE, "orderBy": "set.releaseDate,number", "select": CARD_FIELDS})
+    start = cursor.done("cards", key) if cursor else 0
+    if start:
+        log(f"cards: resuming the {cursor.snap} snapshot after page {start}")
     while True:
         q = urllib.parse.urlencode({"page": page, "pageSize": PAGE_SIZE, "orderBy": "set.releaseDate,number",
                                     "select": CARD_FIELDS})
@@ -377,6 +462,8 @@ def fetch_cards(client: Client, max_pages: int | None = None, log=print):
         rows = d.get("data") or []
         seen += len(rows)
         total = int(d.get("totalCount") or 0)
+        if cursor and page > start:
+            cursor.mark("cards", key, page)
         if page == 1 or page % 10 == 0:
             log(f"cards page {page}: {seen} of {total}")
         yield from rows
@@ -395,7 +482,7 @@ def fetch_eurusd(client: Client) -> float | None:
 
 
 def fetch_sealed(client: Client, snap: str, groups_back: int = 24, log=print,
-                 singles: list[dict] | None = None) -> list[dict]:
+                 singles: list[dict] | None = None, cursor: Cursor | None = None) -> list[dict]:
     """Sealed product (no card number) of the newest `groups_back` TCGplayer
     groups. With `singles` given, the single cards of those groups are
     appended to it too (dearest printing per card): the Pokemon TCG API had
@@ -405,21 +492,30 @@ def fetch_sealed(client: Client, snap: str, groups_back: int = 24, log=print,
     publishedOn is the release date for the main sets but not for every
     group (TCGplayer re-dated old POP Series and promo groups to 2026-10-14),
     so the main sets of the last two years and the next releases (pre-order
-    prices) are always taken as well; `main_set` marks them."""
+    prices) are always taken as well; `main_set` marks them. The cursor
+    counts the groups done (the group list itself is cached for the day)."""
     g = client.get(f"{TCGCSV}/{POKEMON_CATEGORY}/groups", cache_key="tcgcsv_groups")
     groups = sorted(g.get("results") or [], key=lambda x: str(x.get("publishedOn") or ""), reverse=True)
     since = (date.fromisoformat(snap) - timedelta(days=MAIN_SET_DAYS)).isoformat()
     main_ids = {grp.get("groupId") for grp in groups if MAIN_SET.match(str(grp.get("name") or ""))
                 and (_date(grp.get("publishedOn")) or "") >= since}
     pick = [grp for i, grp in enumerate(groups) if i < groups_back or grp.get("groupId") in main_ids]
+    key = f"category={POKEMON_CATEGORY}&groups_back={groups_back}"
+    start = cursor.done("sealed", key) if cursor else 0
+    if start:
+        log(f"sealed: resuming the {cursor.snap} snapshot after group {start} of {len(pick)}")
     out = []
-    for grp in pick:
+    for i, grp in enumerate(pick, 1):
         gid = grp.get("groupId")
         try:
             prods = client.get(f"{TCGCSV}/{POKEMON_CATEGORY}/{gid}/products", cache_key=f"tcgcsv_{gid}_products")
             prices = client.get(f"{TCGCSV}/{POKEMON_CATEGORY}/{gid}/prices", cache_key=f"tcgcsv_{gid}_prices")
         except FetchError as e:
             log(f"sealed: group {gid} skipped ({e})")
+            prods = prices = None
+        if cursor and i > start:
+            cursor.mark("sealed", key, i)  # a skipped group is not cached and is asked for again on a resume
+        if prods is None:
             continue
         by_id: dict = {}
         for p in prices.get("results") or []:
@@ -454,6 +550,45 @@ def fetch_sealed(client: Client, snap: str, groups_back: int = 24, log=print,
                     "market": _num(pr.get("marketPrice")),
                 })
     return out
+
+
+def _age(d: str | None, today: str) -> int | None:
+    try:
+        return (date.fromisoformat(today) - date.fromisoformat(str(d))).days
+    except ValueError:
+        return None
+
+
+def stale_sources(root: Path, today: str, days: int = STALE_DAYS,
+                  current: dict | None = None) -> tuple[bool, str | None]:
+    """(red, line): the line names every source whose newest price is more than
+    `days` old and since when (None if none is); red only when no source has
+    a price that recent. The API's TCGplayer and Cardmarket count by the newest
+    price on the latest snapshot, TCGplayer's dumps by the last snapshot with
+    sealed or new singles in it. `current` is a meta not written yet. In
+    October 2026 the API's TCGplayer prices stood at 2026-10-15 and its
+    Cardmarket prices at 2026-07-01 while every run passed."""
+    metas: dict[str, dict] = {}
+    for f in sorted((root / "meta").glob("*.json")):
+        try:
+            metas[f.stem] = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+    if current:
+        metas[current["date"]] = current
+    fr = (metas[max(metas)].get("freshness") or {}) if metas else {}
+    dumps = max((d for d, m in metas.items() if (m.get("sealed") or 0) + (m.get("singles_new") or 0) > 0), default=None)
+    src = [("TCGplayer (pokemontcg.io)", fr.get("tcgplayer_newest")),
+           ("Cardmarket (pokemontcg.io)", fr.get("cardmarket_newest")),
+           ("TCGplayer dumps (tcgcsv.com)", dumps)]
+    ages = [(name, d, _age(d, today)) for name, d in src]
+    old = [x for x in ages if x[2] is None or x[2] > days]
+    if not old:
+        return False, None
+    red = len(old) == len(ages)
+    return red, (f"pokemon: {'no fresh price' if red else 'stale prices'} on {today}: " + "; ".join(
+        f"{name} since {d} ({a} days)" if d and a is not None else f"{name} never priced" for name, d, a in old)
+        + f" (limit {days} days)")
 
 
 # ---------------------------------------------------------------- writing
@@ -494,6 +629,9 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
     root = lake()
     if client is None:
         client = client_for(None if dry_run else root / "_cache" / snap)
+    # The cursor only for a real full snapshot: a dry run or a --max-pages test neither reads nor moves it.
+    cursor = Cursor.load(None if dry_run or max_pages is not None else root / CURSOR, snap)
+    resumed = {k: v.get("page") for k, v in cursor.pages.items()}
     errors: list[str] = []
     fx_path = root / "fx.json"
     eurusd = fetch_eurusd(client)
@@ -514,7 +652,7 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
         errors.append(f"sets: {e}; rebuilt from the cards' set fields")
     card_sets: dict[str, dict] = {}
     seen, all_rows, catalog = 0, [], []
-    for c in fetch_cards(client, max_pages=max_pages, log=log):
+    for c in fetch_cards(client, max_pages=max_pages, log=log, cursor=cursor):
         seen += 1
         s = c.get("set") or {}
         if s.get("id"):
@@ -540,7 +678,7 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
     singles: list[dict] = []
     if sealed:
         try:
-            sealed_rows = fetch_sealed(client, snap, log=log, singles=singles)
+            sealed_rows = fetch_sealed(client, snap, log=log, singles=singles, cursor=cursor)
         except FetchError as e:
             errors.append(f"sealed: {e}")
         log(f"sealed: {len(sealed_rows)} products, {len(singles)} singles of the newest groups")
@@ -551,8 +689,10 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
         "sealed": len(sealed_rows) if sealed else None, "singles_new": len(singles) if sealed else None,
         "eurusd": eurusd, "fx_source": fx_source,
         "requests": client.requests, "cache_hits": client.cache_hits, "seconds": round(time.time() - t0, 1),
-        "errors": errors, "complete": max_pages is None,
+        "errors": errors, "complete": max_pages is None, "resumed": resumed or None,
     }
+    if not dry_run and rows:
+        meta["stale"] = stale_sources(root, snap, current=meta)[1]
     if dry_run:
         log(json.dumps(meta, indent=2))
         return meta
@@ -570,8 +710,12 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
     (root / "meta" / f"{snap}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     if eurusd and fx_source == "ECB":
         fx_path.write_text(json.dumps({"date": snap, "eurusd": eurusd}), encoding="utf-8")
+    cursor.reset()
     clean_cache(root, date.fromisoformat(snap))
     log(json.dumps(meta))
+    # Only said here; lab.pokemon.daily exits 1 on it after the studies ran.
+    if meta.get("stale"):
+        log(meta["stale"])
     return meta
 
 
@@ -586,8 +730,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="whole-run attempts; the day cache makes each retry continue where the last stopped")
     ap.add_argument("--pause", type=float, default=300.0, help="seconds between whole-run attempts")
     a = ap.parse_args(argv)
-    return run_with_attempts(lambda: collect(a.date, a.min_usd, a.sealed, a.max_pages, a.dry_run),
-                             a.attempts, a.pause)
+
+    def run(snap: str | None) -> int:
+        return run_with_attempts(lambda: collect(snap, a.min_usd, a.sealed, a.max_pages, a.dry_run),
+                                 a.attempts, a.pause)
+
+    if a.date is None and not a.dry_run and a.max_pages is None:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        prev = pending_snapshot(lake(), today)
+        if prev:
+            # Yesterday's run was cut off (the timeout): finish it from its cached
+            # pages first. If it fails again, today's snapshot still runs and takes the cursor.
+            print(f"pokemon collector: finishing the unfinished {prev} snapshot first")
+            run(prev)
+    return run(a.date)
 
 
 def run_with_attempts(fn: Callable[[], dict], attempts: int, pause: float,

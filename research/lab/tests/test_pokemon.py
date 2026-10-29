@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+import urllib.parse
 from datetime import date
 from pathlib import Path
 
@@ -133,6 +134,126 @@ def test_a_failed_run_is_tried_again_and_continues_from_the_cache(lake):
     assert pl.read_parquet(lake / "catalog.parquet").height == 600
     assert col.run_with_attempts(lambda: (_ for _ in ()).throw(col.FetchError("down")), 2, 1.0,
                                  sleep=lambda s: None) == 1
+
+
+def _paged(m, seen, fail_page=None):
+    """The market's opener that records card pages and refuses `fail_page` every try."""
+    inner = m.opener()
+
+    def opener(url, h, t):
+        if "/cards" in url:
+            page = int(urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["page"][0])
+            seen.append(page)
+            if page == fail_page:
+                return 502, {}, b""
+        return inner(url, h, t)
+    return opener
+
+
+def test_the_next_run_resumes_an_unfinished_snapshot_from_the_cursor(lake):
+    m = Market(date(2026, 3, 1), n_sets=2, per_set=300)  # 600 cards: three pages
+    cache = lake / "_cache" / "2026-03-01"
+    seen: list[int] = []
+    cl = col.Client(opener=_paged(m, seen, fail_page=3), sleep=lambda s: None, spacing=0.0, retries=2, cache_dir=cache)
+    with pytest.raises(col.FetchError):
+        col.collect("2026-03-01", min_usd=0.0, client=cl, log=lambda *a: None)
+    cur = json.loads((lake / col.CURSOR).read_text())
+    assert cur["date"] == "2026-03-01" and cur["pages"]["cards"]["page"] == 2, "pages 1 and 2 are done"
+    # The timeout killed it: the next day finds it unfinished and finishes it under its own date.
+    assert col.pending_snapshot(lake, "2026-03-02") == "2026-03-01"
+    assert col.pending_snapshot(lake, "2026-03-01") is None, "today's own cursor is not a pending snapshot"
+    assert col.pending_snapshot(lake, "2026-03-03") is None, "older than RESUME_DAYS: started afresh"
+    seen.clear()
+    logs: list[str] = []
+    cl = col.Client(opener=_paged(m, seen), sleep=lambda s: None, spacing=0.0, cache_dir=cache)
+    meta = col.collect("2026-03-01", min_usd=0.0, client=cl, log=logs.append)
+    assert seen == [3], "only the page after the cursor went to the network"
+    assert meta["resumed"] == {"cards": 2} and any("after page 2" in x for x in logs)
+    assert pl.read_parquet(lake / "catalog.parquet").height == 600
+    assert pl.read_parquet(lake / "cards" / "date=2026-03-01" / "cards.parquet").height == 600
+
+
+def test_a_finished_snapshot_resets_the_cursor(lake):
+    m = Market(date(2026, 3, 1), n_sets=2, per_set=300)
+    seen: list[int] = []
+    for day in ("2026-03-01", "2026-03-02"):
+        cl = col.Client(opener=_paged(m, seen), sleep=lambda s: None, spacing=0.0, cache_dir=lake / "_cache" / day)
+        meta = col.collect(day, min_usd=0.0, client=cl, log=lambda *a: None)
+        assert not (lake / col.CURSOR).exists() and meta["resumed"] is None
+    assert seen == [1, 2, 3, 1, 2, 3], "the second day starts at page 1"
+    assert col.pending_snapshot(lake, "2026-03-03") is None
+    # A cursor of another day or another query counts for nothing.
+    c = col.Cursor(lake / col.CURSOR, "2026-03-04")
+    c.mark("cards", "q=a", 5)
+    assert col.Cursor.load(lake / col.CURSOR, "2026-03-04").done("cards", "q=a") == 5
+    assert col.Cursor.load(lake / col.CURSOR, "2026-03-04").done("cards", "q=b") == 0
+    assert col.Cursor.load(lake / col.CURSOR, "2026-03-05").pages == {}
+    # A dry run and a --max-pages test neither read nor move it.
+    col.collect("2026-03-04", min_usd=0.0, max_pages=1, client=col.Client(opener=m.opener(), sleep=lambda s: None,
+                                                                          spacing=0.0), log=lambda *a: None)
+    assert json.loads((lake / col.CURSOR).read_text())["pages"] == {"cards": {"query": "q=a", "page": 5}}
+
+
+def test_main_finishes_yesterdays_snapshot_before_todays(lake, monkeypatch):
+    calls = []
+    monkeypatch.setattr(col, "collect", lambda snap, *a, **k: calls.append(snap) or {})
+
+    class Now(col.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return col.datetime(2026, 3, 2, 7, 5, tzinfo=col.timezone.utc)
+
+    monkeypatch.setattr(col, "datetime", Now)
+    assert col.main([]) == 0 and calls == [None], "nothing pending: today's only"
+    (lake / "_cache" / "2026-03-01").mkdir(parents=True)
+    (lake / col.CURSOR).write_text(json.dumps({"date": "2026-03-01", "pages": {"cards": {"query": "x", "page": 40}}}))
+    calls.clear()
+    assert col.main([]) == 0 and calls == ["2026-03-01", None]
+    calls.clear()
+    assert col.main(["--date", "2026-03-02"]) == 0 and calls == ["2026-03-02"], "an explicit date is taken as asked"
+
+
+def test_one_stale_source_is_named_and_all_stale_is_red_after_the_studies(lake, monkeypatch, capsys):
+    m = Market(date(2026, 3, 1), n_sets=3, per_set=20)
+    meta = col.collect("2026-03-01", min_usd=1.0, client=col.Client(opener=m.opener(), sleep=lambda s: None,
+                                                                    spacing=0.0), log=lambda *a: None)
+    assert meta["stale"] is None or "never priced" in meta["stale"], "no dumps without --sealed"
+    assert col.stale_sources(lake, "2026-03-04") == (
+        False, "pokemon: stale prices on 2026-03-04: TCGplayer dumps (tcgcsv.com) never priced (limit 3 days)")
+    red, line = col.stale_sources(lake, "2026-03-06")
+    assert red and "no fresh price" in line and "TCGplayer (pokemontcg.io) since 2026-03-01 (5 days)" in line
+    assert "Cardmarket (pokemontcg.io) since 2026-03-01 (5 days)" in line and "\u2014" not in line
+    assert col.stale_sources(lake / "nothing", "2026-03-06")[1].count("never priced") == 3
+
+    # Cardmarket frozen since 2026-01-01 on a day the dumps are fresh: named, not red.
+    for f in (lake / "meta").glob("*.json"):
+        f.unlink()
+    frozen = {**meta, "date": "2026-03-06", "sealed": 5,
+              "freshness": {**meta["freshness"], "cardmarket_newest": "2026-01-01"}}
+    (lake / "meta" / "2026-03-06.json").write_text(json.dumps(frozen))
+
+    class Now(daily.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return daily.datetime(2026, 3, 6, 9, tzinfo=daily.timezone.utc)
+
+    monkeypatch.setattr(daily, "datetime", Now)
+    capsys.readouterr()
+    assert daily.main(["--no-alerts", "--no-eval"]) == 0
+    err = capsys.readouterr().err
+    assert "stale prices on 2026-03-06" in err and "Cardmarket (pokemontcg.io) since 2026-01-01 (64 days)" in err
+    assert "TCGplayer dumps" not in err
+    rep = json.loads((lake.parent / "reports" / "pokemon" / "latest.json").read_text())
+    assert "Cardmarket (pokemontcg.io) since 2026-01-01" in rep["meta"]["stale"]
+    assert "- Stale: " in (lake.parent / "reports" / "pokemon" / "latest.md").read_text()
+
+    # Every source stale: the studies still run on the old prices, then red.
+    (lake / "meta" / "2026-03-06.json").write_text(json.dumps({**frozen, "date": "2026-03-01", "sealed": 5}))
+    (lake / "meta" / "2026-03-06.json").rename(lake / "meta" / "2026-03-01.json")
+    (lake / "ui" / "latest.json").unlink()
+    assert daily.main(["--no-alerts", "--no-eval"]) == 1
+    assert "no fresh price on 2026-03-06" in capsys.readouterr().err
+    assert (lake / "ui" / "latest.json").exists(), "the studies still ran on the old prices"
 
 
 def test_api_key_comes_from_the_environment_only(monkeypatch):
@@ -426,7 +547,13 @@ def test_collection_never_buys_weak_forecasts(tmp_path):
 
 # ---------------------------------------------------------------- alerts
 
+# 2026-10-15 12:00 UTC, 14:00 in Berlin: outside the quiet hours, so the
+# alert tests do not depend on the hour they run at.
+DAYTIME_MS = 1_792_065_600_000
+
+
 def test_alerts_moves_undervalued_and_cooldown(lake, monkeypatch):
+    monkeypatch.setattr(alerts.notify, "clock_ms", lambda: DAYTIME_MS)
     snap = pl.DataFrame({
         "card_id": ["a", "b", "c", "d"], "name": ["A", "B", "C", "D"], "set_name": ["S"] * 4,
         "price": [50.0, 50.0, 5.0, 40.0], "ret_1d": [math.log(1.3), math.log(1.05), math.log(2.0), None],
@@ -446,6 +573,7 @@ def test_alerts_moves_undervalued_and_cooldown(lake, monkeypatch):
 
 
 def test_alerts_post_to_telegram(lake, monkeypatch):
+    monkeypatch.setattr(alerts.notify, "clock_ms", lambda: DAYTIME_MS)
     sent = []
     monkeypatch.setenv("PYTHIA_TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("PYTHIA_TELEGRAM_CHAT_ID", "42")

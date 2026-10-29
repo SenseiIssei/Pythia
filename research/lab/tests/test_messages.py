@@ -394,6 +394,40 @@ def test_the_lab_card_says_what_the_factories_and_the_zoo_did_today(data):
     assert labor.build(now, "en", 160.0) is None, "nothing of today: no card"
 
 
+def small_report(now: int) -> dict:
+    """F2's factory.json as lab.factory.small writes it (its own fields, none of F3's)."""
+    return {"updated_ms": now - 16 * 3_600_000, "run_id": "2026-10-26", "search": {"evaluated": 60},
+            "pool_after": {"n_trials": 2768, "sr0_annual": 2.75, "excess_sr0_annual": 1.3233},
+            "top": [{"key": "e23109c9c66f", "is_sharpe": 1.6408}],
+            "holdout": [{"key": "8975c5b699be", "decision": "stopped"}, {"key": "90d44b3aeb51", "decision": "shadow"}],
+            "shadows": [{"key": "90d44b3aeb51", "status": "active"}, {"key": "x", "status": "retired"}]}
+
+
+def test_the_lab_card_reads_f2s_own_report(data):
+    now = utc(2026, 10, 26, 19, 0)
+    fill_factory(data, now)
+    write(data, "reports/smallaccount/factory.json", small_report(now))
+    for lang, want in (("de", ["F2 Kleinkonten 60 Genome dieser Lauf, 2.768 Versuche im Pool",
+                               "Schwelle Überschuss-Sharpe über SPYx 1,32 gegen 2.768 Versuche",
+                               "bester neuer e23109c9c66f: Sharpe im Lernzeitraum 1,64",
+                               "2 zurückgehalten geprüft, 1 in ein Schatten-Wallet", "Schatten-Wallets 1 laufen"]),
+                       ("en", ["F2 small wallets 60 genomes this run, 2,768 trials in the pool",
+                               "bar excess Sharpe over SPYx 1.32 against 2,768 trials",
+                               "best new e23109c9c66f: in-sample Sharpe 1.64",
+                               "2 checked held back, 1 to a shadow wallet", "shadow wallets 1 running"])):
+        text = notify.plain(labor.build(now, lang, 160.0).render("telegram", lang))
+        assert all(w in text for w in want), (w, text)
+        assert "no fresh report" not in text and "kein frischer Bericht" not in text
+        if lang == "de":
+            no_english(labor.build(now, "de", 160.0).render("telegram", "de"))
+    line = briefing.factory_line("F2", {**small_report(now), "top": [], "holdout": [], "shadows": []}, "en")
+    assert "no new candidate" in line.text and "0 checked held back" in line.text
+    assert briefing.factory_line("F2", {"updated_ms": now, "pool_after": {}}, "en") is None, "no pool: no line"
+    cards, _ = briefing.build(utc(2026, 10, 27, 8, 0), "en", [], briefing.read_ledger(), 158.2, {})
+    text = notify.plain(notify.render_post(cards, "telegram", lang="en"))
+    assert "F2 small wallets 60 genomes this run" in text, "the morning briefing has the same line"
+
+
 def test_the_lab_card_keeps_to_eight_lines():
     rep = {"updated_ms": 10 ** 13, "trials_ever": 5, "trials_tonight": 5, "proposals": ["F3_1"],
            "books": [{"book": f"F3_{i}", "sol": 0.5} for i in range(9)]}

@@ -767,9 +767,13 @@ closed by `as_of` (default now); a bar still forming is never complete.
   PAXG and the on-chain coins' deepest USDC or SOL pool on GeckoTerminal's
   free API, 1h and 1d in USD with the pool's liquidity; Yahoo 1d (from 2000)
   and 1h (two years) of the underlyings SPY, QQQ, GLD, NVDA. Job
-  `candles-markets` (hourly; one call per 6 s, at most 40 a run, a 429
-  backs it off from 2 up to 30 minutes, then the 1h history is walked back
-  half a year). Markets and limits: `lab/candles/markets.json`.
+  `candles-markets` (hourly; one call per 6 s, at most 40 calls and 5
+  minutes a run; pools without a bar first, then where the last run stopped
+  (`gecko_cursor.json`), then the stalest, the 1h history walked back half a
+  year last; a 429 waits once, the next ends the run, keeps the rest for the
+  next one and backs it off from 2 up to 30 minutes). `candles-health` is
+  red per pool: each one whose 1h bar is over 3 hours or 1d bar over 2 days
+  old, or that has none, is named. Markets and limits: `lab/candles/markets.json`.
 - **Storage** under `<data>/candles/source=<s>/asset=<a>/tf=<tf>/`: a
   month's parts, merged into `<YYYY-MM>.parquet` by job `candles-compact`
   (01:40 UTC, finished months final), `manifest.json` (per market and

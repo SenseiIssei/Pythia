@@ -543,7 +543,8 @@ def research_section(rep: dict | None, now: int, lang: str, n: int = 5) -> tuple
 
 
 # The research factories: (code, the report's folder, its file). F3 is the pump.fun factory (lab.pumpfun_rt.factory);
-# F2, the small-account factory, writes the same fields to reports/smallaccount/factory.json once it runs.
+# F2, the small-account factory (lab.factory.small), writes reports/smallaccount/factory.json with fields of its own
+# (search, top, holdout, pool_after, shadows): small_factory_line reads those.
 FACTORIES = (("F3", "pumpfun_rt", "factory.json"), ("F2", "smallaccount", "factory.json"))
 
 
@@ -566,7 +567,9 @@ def per_entry(r: dict, lang: str) -> str | None:
 def factory_line(code: str, rep: dict | None, lang: str) -> Line | None:
     """One factory in one line: its trials last night and in all, the bar, the night's best candidate (its mean per
     entry with the band and the trimmed mean, its scored days) with its held-back result, the paper books started and
-    retired that night, the model settings adopted."""
+    retired that night, the model settings adopted. F2's own report goes to small_factory_line."""
+    if code == "F2" and isinstance(rep, dict) and isinstance(rep.get("pool_after"), dict):
+        return small_factory_line(rep, lang)
     if not isinstance(rep, dict) or _num(rep.get("trials_ever")) is None:
         return None
     de = lang == "de"
@@ -606,6 +609,34 @@ def factory_line(code: str, rep: dict | None, lang: str) -> Line | None:
     took = [k for k, v in mods.items() if isinstance(v, dict) and v.get("adopted")]
     bits.append(tr("bf_fac_models", lang, labels=", ".join(took)) if took else tr("bf_fac_models_none", lang))
     return Line(" · ".join(bits), tr("bf_fac_" + code, lang))
+
+
+def small_factory_line(rep: dict, lang: str) -> Line | None:
+    """F2 (reports/smallaccount/factory.json) in one line: genomes this run and the pool after it, the bar (the
+    excess Sharpe over SPYx that noise reaches over that many trials), the run's best in sample, the held-back checks
+    and how many started a shadow wallet, the shadow wallets running. None without a pool."""
+    pool = rep.get("pool_after") if isinstance(rep.get("pool_after"), dict) else {}
+    if _num(pool.get("n_trials")) is None:
+        return None
+    de = lang == "de"
+    n = int(_num((rep.get("search") or {}).get("evaluated")) or 0)
+    ever = i18n.num(_num(pool.get("n_trials")) or 0, 0, lang)
+    bits = [tr("bf_f2_trials", lang, n=n, ever=ever)]
+    bar = _num(pool.get("excess_sr0_annual"))
+    if bar is not None:
+        bits.append(tr("bf_f2_bar", lang, sharpe=i18n.num(bar, 2, lang), n=ever))
+    best = next((r for r in rep.get("top") or [] if isinstance(r, dict) and r.get("key")), None)
+    if best is None:
+        bits.append(tr("bf_fac_none", lang))
+    else:
+        sh = _num(best.get("is_sharpe"))
+        bits.append(f"{'bester neuer' if de else 'best new'} {best['key']}"
+                    + (f": {tr('bf_f2_is', lang, sharpe=i18n.num(sh, 2, lang))}" if sh is not None else ""))
+    held = [h for h in rep.get("holdout") or [] if isinstance(h, dict)]
+    bits.append(tr("bf_f2_held", lang, n=len(held), shadow=sum(1 for h in held if h.get("decision") == "shadow")))
+    sw = [s for s in rep.get("shadows") or [] if isinstance(s, dict) and s.get("status") == "active"]
+    bits.append(tr("bf_f2_shadows", lang, active=len(sw)))
+    return Line(" · ".join(bits), tr("bf_fac_F2", lang))
 
 
 def alloc_line(rep: dict | None, lang: str) -> Line | None:

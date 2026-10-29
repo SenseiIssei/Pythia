@@ -750,9 +750,11 @@ jobs:
   # walk-forward 2021 to 2023 against the baseline and the zoo model it would replace; at most 2 a run held back
   # (2024 to 2026-06, a DM p under 0.05 over all trials); passes run as shadows next to the zoo, retired after 60 days
   # behind. Time budget PYTHIA_MODEL_FACTORY_BUDGET (seconds), resumable; reports/models/factory.md. Paper only.
+  # 10:00, not 03:50 (2026-10-29): its ~1,500 s held the heavy lock into 04:15, so the morning paper books (04:00 to
+  # 06:15) queued behind it; at 10:00 the night's heavy jobs and the paper books are done.
   - name: model-factory
     description: model factory G2, daily; new model specs on the zoo's targets through a purged walk-forward against the baseline and the incumbent, held-back checks over all trials, shadows next to the zoo, reports/models/factory.md
-    schedule: "50 3 * * *"
+    schedule: "0 10 * * *"
     command: python -m lab.models.factory
     env: {PYTHIA_MODEL_FACTORY_BUDGET: "1500", PYTHIA_ML_THREADS: "3"}
     resources: {cpus: 3, memory: 6g}
@@ -970,7 +972,7 @@ jobs:
     alert: false
 
   - name: candles-markets
-    description: candles, GeckoTerminal 1h and 1d of the xStocks tokens, PAXG and the on-chain coins' Solana pools with liquidity, Yahoo of their underlyings, read only
+    description: candles, GeckoTerminal 1h and 1d of the xStocks tokens, PAXG and the on-chain coins' Solana pools with liquidity (empty pools first, then where the last run stopped, then the stalest; 5 minutes and 40 calls a run, a 429 waits once then stops and keeps the rest for the next run), Yahoo of their underlyings, read only
     schedule: "7 * * * *"
     command: python -m lab.candles.live markets
     resources: {cpus: 1, memory: 512m}
@@ -979,7 +981,7 @@ jobs:
     alert: false
 
   - name: candles-health
-    description: candles, the Binance REST fill and the Kraken candles under 30 minutes old, the Solana pools under 3 hours
+    description: candles, the Binance REST fill and the Kraken candles under 30 minutes old, every Solana pool's 1h under 3 hours and 1d under 2 days (each missing or late pool listed)
     schedule: "*/10 * * * *"
     command: python -m lab.candles.store health
     resources: {cpus: 1, memory: 256m}
@@ -1105,9 +1107,9 @@ jobs:
     command: python -m lab.pumpfun_rt.study
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 2, memory: 8g}
-    # 8h, not 4h, until the replay is incremental (2026-10-29: its runtime grew 2,676 to 12,943 s in a week, about
-    # 40 min a day, as it replays the whole growing record; the next run would have hit 4h)
-    timeout: 8h
+    # 4h again (2026-10-29): the runtime grew 2,676 to 12,943 s in a week while the record filled up to its 14 days
+    # (the 8h stopgap); now the model-free part of pass 2 replays while a second process runs pass 1 and the model half
+    timeout: 4h
     lock: pumpfun-rt
     lock_wait: 10m
 
@@ -1135,7 +1137,7 @@ jobs:
     lock: pumpfun-rt-activity
 
   - name: cs2-collect
-    description: CS2 skins, Skinport snapshots and sales history, Steam prices for the watchlist
+    description: CS2 skins, Skinport snapshots and sales history, Steam prices for the watchlist (15 a run, rotating; a 429 cools Steam down 1 h doubling to 12 h; red when Steam is asked and gives no price)
     schedule: "12 * * * *"
     command: python -m lab.collect.cs2
     resources: {cpus: 1, memory: 4g}
@@ -1270,7 +1272,7 @@ jobs:
   # Added disabled; switch on (enabled: true, then deploy_ops.sh) once the
   # module is deployed to /opt/pythia-lab and its command is confirmed.
   - name: pokemon
-    description: Pokemon cards, price snapshot (sealed products too), then studies, forecasts, the paper collection and card alerts
+    description: Pokemon cards, price snapshot (sealed products too; a snapshot the timeout cut off the day before is finished first from its cursor), then studies, forecasts, the paper collection and card alerts; stale price sources are named, the job ends red when no source (TCGplayer, Cardmarket, TCGplayer dumps) has a price of the last 3 days
     schedule: "5 7 * * *"
     command: sh -c 'python -m lab.collect.pokemon --sealed && python -m lab.pokemon.daily'
     env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
