@@ -469,3 +469,137 @@ def test_the_recorded_data_of_2026_10_27_has_no_candidate_above_step_3(tmp_path)
 def test_the_labs_data_has_no_candidate_above_step_3():
     d = ladder.build(Path("/data"))
     assert d["rows"] and max(r["step"] for r in d["rows"]) <= 3
+
+
+# ---------------------------------------------------------------- the pump.fun rules per trade
+
+PF_HEAD = "rule,mint,signal_ms,land_ms,exit_signal_ms,exit_ms,exit_why,ret,hold_s,stake_sol"
+PF_COMMITS = {**COMMITS, "pumpfun_exits_y8_prereg.md": (ts("2026-10-23"), "y1"),
+              "pumpfun_exits_y8.md": (ts("2026-10-23") + 600, "y2"), "pumpfun_pool0_prereg.md": (ts("2026-10-22"), "y3"),
+              "pumpfun_realtime_plan.md": (ts("2026-10-20"), "x1"), "pumpfun_realtime.md": (ts("2026-10-20") + 60, "x2")}
+
+
+def pf_rows(rule: str, first: str, days: int, mean: float, per_day: int = 30, seed: int = 1, sd: float = 0.3,
+            tainted: float | None = None) -> list[str]:
+    """per_day closed trades a day from `first` on, returns N(mean, sd); with `tainted` one more row a day with that
+    return which landed before its signal (P1)."""
+    rng = np.random.default_rng(seed)
+    t0 = ts(first) * 1000 + 3_600_000
+    out = []
+    for d in range(days):
+        for k in range(per_day + (tainted is not None)):
+            s = t0 + d * 86_400_000 + k * 60_000
+            bad = k == per_day
+            land = s - 1_000 if bad else s + 5_000
+            ret = tainted if bad else float(rng.normal(mean, sd))
+            out.append(f"{rule},m{d}_{k},{s},{land},{land + 60_000},{land + 60_500},take,{ret},60,0.1")
+    return out
+
+
+def pf_data(data: Path, results: Path, rows: list[str], ten: bool = False, selection: dict | None = None,
+            lat: float = 0.02) -> None:
+    for f in PF_COMMITS:
+        (results / f).write_text("# x\n", encoding="utf-8")
+    write(data, "paper/pumpfun_rt/ledger.csv", PF_HEAD + "\n" + "".join(r + "\n" for r in rows))
+    write(data, "paper/pumpfun_rt/failed.csv", "rule,mint,signal_ms,land_ms,why,pnl_sol\n"
+          f"P_pool0_wait,mf,{ts('2026-10-26') * 1000},{ts('2026-10-26') * 1000 + 900},not landed,-0.0002\n")
+    rng = np.random.default_rng(7)                            # F3's trials: per-entry Sharpes of no skill
+    jsonl(data, "pumpfun_rt/factory/ledger.jsonl", [{"kind": "trial", "id": f"F3_{i:05d}", "entries": 200,
+                                                     "sharpe": float(rng.normal(0, 0.05))} for i in range(60)])
+    write(data, "reports/pumpfun_rt/latest.json", {"results": [
+        {"rule": r, "stress": {"lat2x": {"mean": lat}}} for r in ladder.PF_RULES]})
+    rj = {"selection": selection} if selection is not None else {}
+    if ten:
+        rj["ten"] = [{"book": "P_pool0_wait_10eur", "strategy": "P_pool0_wait", "days": 31.0, "trades": 40,
+                      "mean": 0.05, "band": [0.01, 0.09], "tainted": 0, "gap_pts": 1.0, "pass": True,
+                      "gate": {"days": True, "mean": True, "band": True, "gap": True, "taint": True}}]
+    write(data, "reports/pumpfun_rt/realistic.json", rj)
+
+
+def pf_run(env) -> dict:
+    return run(env, PF_COMMITS)
+
+
+def test_a_planted_edge_per_trade_reaches_step_2_and_noise_does_not(env):
+    data, results = env
+    pf_data(data, results, pf_rows("P_pool0_wait", "2026-10-25", 10, 0.25)
+            + pf_rows("P_pool0", "2026-10-25", 10, 0.0, seed=2) + pf_rows("E_d0_x1", "2026-10-25", 10, 0.25, seed=3))
+    rows = pf_run(env)
+    edge, noise, old = rows["pumpfun:P_pool0_wait"], rows["pumpfun:P_pool0"], rows["pumpfun:E_d0_x1"]
+    assert edge["step"] == 2 and edge["missing"] == ["pf_edge"] and "11 days" in edge["next"], edge["next"]
+    st = {x["id"]: x for x in edge["steps"]["2"]}
+    assert all(x["ok"] for x in st.values()) and "pumpfun trials" in st["dsr_family"]["value"]
+    x = edge["pumpfun"]
+    assert x["entries"] == 301 and x["days_traded"] == 10 and x["dsr_all"] > 0.99 and x["to_bar"] == 0
+    assert x["to_power"] >= 1 and x["mean"] > 0.2 and edge["benchmark"] == "0"
+    assert noise["step"] == 1 and {"dsr_all", "dsr_family"} <= set(noise["missing"])
+    assert noise["pumpfun"]["dsr_all"] < 0.95
+    assert old["step"] == 1 and "pf_era" in old["missing"] and "old paper model" in old["next"]
+    for r in ("P_cmig_model", "P_pool0_wait_norug_half"):          # listed, with no record
+        assert rows[f"pumpfun:{r}"]["step"] <= 1 and rows[f"pumpfun:{r}"]["pumpfun"]["entries"] == 0
+    md = ladder.markdown(ladder.build(data, NOW, results=results, added=added(PF_COMMITS)))
+    assert "pump.fun rules per trade" in md and "| P_pool0_wait | 2 tested |" in md and "\u2014" not in md
+
+
+def test_too_few_days_or_a_late_loss_hold_a_planted_edge_at_step_1(env):
+    data, results = env
+    pf_data(data, results, pf_rows("P_pool0_wait", "2026-10-25", 6, 0.25), lat=-0.01)
+    r = pf_run(env)["pumpfun:P_pool0_wait"]
+    assert r["step"] == 1 and set(r["missing"]) == {"pf_scored", "pf_late"} and "6 of 10 days" in r["next"]
+    assert r["pumpfun"]["to_bar"] == 4
+
+
+def test_tainted_rows_are_ignored(env):
+    data, results = env
+    pf_data(data, results, pf_rows("P_pool0", "2026-10-25", 10, 0.0, seed=2, tainted=5.0)
+            + pf_rows("P_pool0_wait", "2026-10-25", 10, 0.25, tainted=-1.0))
+    rows = pf_run(env)
+    noise, edge = rows["pumpfun:P_pool0"], rows["pumpfun:P_pool0_wait"]
+    assert noise["step"] == 1 and noise["pumpfun"]["entries"] == 300 and noise["tainted"] == 10
+    assert "10 tainted rows left out" in noise["steps"]["2"][0]["value"]
+    assert edge["step"] == 2 and edge["pumpfun"]["entries"] == 301 and edge["pumpfun"]["mean"] > 0.2
+
+
+def test_a_missing_ten_section_stays_open_and_blocks_step_5(env):
+    data, results = env
+    pf_data(data, results, pf_rows("P_pool0_wait", "2026-10-25", 22, 0.25))
+    r = pf_run(env)["pumpfun:P_pool0_wait"]
+    assert r["step"] == 4 and r["missing"] == ["p3_gap", "p3_book"]
+    assert all(x["ok"] is None for x in r["steps"]["5"]) and "open: no 10 EUR paper book" in r["next"]
+    assert r["pumpfun"]["e"] >= 20 and r["pumpfun"]["e_fresh"] >= 20
+    pf_data(data, results, pf_rows("P_pool0_wait", "2026-10-25", 22, 0.25), ten=True,
+            selection={"pts": 18.9, "pass": False})
+    r = pf_run(env)["pumpfun:P_pool0_wait"]
+    assert r["step"] == 4 and r["missing"] == ["p3_gap"] and "+18.9 points" in r["next"]
+    pf_data(data, results, pf_rows("P_pool0_wait", "2026-10-25", 22, 0.25), ten=True,
+            selection={"pts": 1.0, "pass": True})
+    assert pf_run(env)["pumpfun:P_pool0_wait"]["step"] == 5
+
+
+def test_the_fresh_days_alone_judge_step_4():
+    # an edge before the pre-registration, noise after it: step 3's e-process crosses, step 4's on the fresh days not
+    rng = np.random.default_rng(3)
+    t0 = ts("2026-10-08") * 1000
+    es = [(t0 + d * 86_400_000 + k * 60_000, float(rng.normal(0.25 if d < 22 else 0.0, 0.3)))
+          for d in range(34) for k in range(30)]
+    sharpes = list(np.random.default_rng(7).normal(0, 0.05, 60))
+    x = ladder.pf_record(es, NOW, 1000, 100, sharpes)
+    assert x["days_traded"] == 34 and x["edge_day"] and x["edge_day"] < ladder.PF_FRESH_FROM
+    assert x["e_fresh"] is not None and x["e_fresh"] < 20 and x["fresh_day"] is None
+    assert ladder.pf_record([], NOW, 1000, 100, sharpes)["mean"] is None
+
+
+def test_the_report_registers_the_five_trials_once(env):
+    data, results = env
+    pf_data(data, results, pf_rows("P_pool0_wait", "2026-10-25", 3, 0.0))
+    d = ladder.build(data, NOW, results=results, added=added(PF_COMMITS))
+    ladder.publish(d)
+    ladder.publish(d)
+    ids = [r["id"] for r in metrics.read_registry() if r["id"].startswith("pumpfun:ladder:")]
+    assert sorted(ids) == sorted(f"pumpfun:ladder:{r}" for r in ladder.PF_RULES)
+    assert metrics.trial_pool("pumpfun")["n_trials"] == 5
+
+
+def test_without_pumpfun_data_no_rule_is_listed(env):
+    s1_book(env[0], 1)
+    assert not [r for r in run(env).values() if r["kind"] == "rule"]

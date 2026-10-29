@@ -16,10 +16,18 @@ Each step requires the one before:
                mean and band above 0 after all costs, P2's gap under 2 points, P1's taint out), shown on its own too
   6 larger     only by the owner; the ladder never sets it
 
+The pump.fun rules the live bot ran and the real-time report's best (PF_RULES) are judged per trade on the realistic
+paper ledger (results/ladder_pumpfun_prereg.md): step 2 R7's bar (the Sharpe per entry deflated on its day-clustered
+effective entries over R5 and the pumpfun family plus F3's trials, 20 entries, 10 scored days), the lat 2x stress as
+the late fill, realistic execution only, P1's tainted rows out; step 3 T8's e-process on the day sums of the entries;
+step 4 the same on the days after the pre-registration only; step 5 P2's selection gap and P3's 10 EUR book, absent
+open (and blocking). Each rule shows its days of record, entries and the days still needed at its current mean.
+
 A condition passes, fails or is open. Open is allowed on step 1 only (the commit date without git); from step 2 on
 everything fails closed: missing evidence (no leak record, no PBO, no T8 report, a DSR deflated over far fewer trials
-than today's and no series to recompute it) fails, and climb() treats an open condition there as a fail too. The ladder computes no performance number (no trial), reads only, and writes nothing but
-reports/ladder/latest.json and .md. It proposes; it never arms, changes or sends anything.
+than today's and no series to recompute it) fails, and climb() treats an open condition there as a fail too. The ladder computes no performance number except the pump.fun rules' (five trials, pf_trials, counted in their
+own DSRs and registered when the report is written), reads only, and writes nothing but reports/ladder/latest.json
+and .md and those five registry lines. It proposes; it never arms, changes or sends anything.
 
   python -m lab.ops.ladder            write the report (the Lab Live job also writes it every run)
   python -m lab.ops.ladder --print    print the table, write nothing
@@ -29,6 +37,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 import subprocess
 import sys
@@ -62,7 +71,7 @@ EXEC_DRIFT_PCT = 1.0
 EXEC_DAYS = 90
 
 # What each kind is judged against at the lockbox; what each factory's look is against (R6).
-BENCH = {"crypto": "btc_eth", "small": "ucits", "neutral": "zero"}
+BENCH = {"crypto": "btc_eth", "small": "ucits", "neutral": "zero", "pumpfun": "zero"}
 BENCH_TEXT = {"btc_eth": "BTC and ETH held", "ucits": "a UCITS S&P 500 fund in EUR", "zero": "0",
               "btc": "BTC held", "spyx": "the SPYx wallet"}
 LOOK_BENCH = {"factory": "btc", "weekly": "btc", "small": "spyx"}
@@ -83,12 +92,29 @@ PREREG = {
     "btc_gated": ("gated_btc_prereg.md", "gated_btc.md"),
     "onchain_meme": ("onchain_meme_prereg.md", "onchain_meme.md"),
     "EQ1": ("etf_books_eq1_prereg.md", "etf_books_eq1.md"),
+    "X10": ("pumpfun_realtime_plan.md", "pumpfun_realtime.md"),
+    "Y6": ("pumpfun_pool0_prereg.md", None),
+    "Y8": ("pumpfun_exits_y8_prereg.md", "pumpfun_exits_y8.md"),
+    "Y16": ("pumpfun_rugfilter_prereg.md", "pumpfun_rugfilter.md"),
 }
 EQ1_JSON = "etf_books_eq1.json"     # EQ1's study numbers per book, variant and broker (lab.experiments.etf_books_eq1)
 # A paper book's name in T1's weekly leak check (lab.leak.checks.book_functions).
 LEAK_NAMES = {"tsmom": "families", "tsmom_regime": "families", "tsmom_top20": "families",
               "breakout_top10": "families", "memes_rotation": "memes", "memes_tsmom": "memes",
               "btc_gated": "btc_gated", "perps_neutral": "perps_neutral lowvol"}
+
+# The pump.fun rules judged per trade (results/ladder_pumpfun_prereg.md): rule -> (pre-registration, a realistic
+# paper book: E_d0_x1 runs on the old paper model only, P_pool0 is the same rule realistic).
+PF_RULES = {"P_pool0_wait": ("Y8", True), "P_pool0": ("Y6", True), "P_cmig_model": ("X10", True),
+            "P_pool0_wait_norug_half": ("Y16", True), "E_d0_x1": ("X10", False)}
+PF_PREREG = "results/ladder_pumpfun_prereg.md"
+PF_REAL_FROM_MS = int(datetime(2026, 10, 24, 1, 43, tzinfo=timezone.utc).timestamp() * 1000)   # R1's switch
+PF_FRESH_FROM = "2026-10-30"            # step 4: only the days after the pre-registration
+PF_REF_DAYS = 10                        # T8's REF_DAYS: the e-process's scale, not tested
+PF_REF_SHARPE = 0.1                     # per entry: the e-process's horizon
+PF_MIN_ENTRIES, PF_MIN_DAYS = 20, 10    # R7 (factory.MIN_ENTRIES, MIN_DAYS)
+PF_LEDGER = "paper/pumpfun_rt/ledger.csv"
+PF_REPORT = "reports/pumpfun_rt/realistic.json"
 
 # The conditions in both languages, for the report and the briefing.
 COND = {
@@ -122,6 +148,14 @@ COND = {
     "p3_band": ("the band's lower end above 0", "untere Bandgrenze über 0"),
     "p3_gap": ("P2's paper minus live under 2 points", "P2: Papier minus live unter 2 Punkten"),
     "p3_taint": ("P1's taint excluded", "P1-Fehlzeilen ausgeschlossen"),
+    "p3_book": ("a 10 EUR paper book (P3)", "ein 10-EUR-Papierbuch (P3)"),
+    "pf_taint": ("P1's tainted rows out", "P1-Fehlzeilen draußen"),
+    "pf_late": ("latency doubled still positive", "doppelte Latenz noch positiv"),
+    "pf_era": ("realistic execution only", "nur realistische Ausführung"),
+    "pf_scored": (f"{PF_MIN_ENTRIES} entries on {PF_MIN_DAYS} scored days",
+                  f"{PF_MIN_ENTRIES} Einstiege an {PF_MIN_DAYS} gewerteten Tagen"),
+    "pf_edge": ("edge shown per trade (T8's e-process)", "Vorteil je Trade gezeigt (T8-E-Prozess)"),
+    "pf_fresh": (f"edge shown from {PF_FRESH_FROM} on, against 0", f"Vorteil ab {PF_FRESH_FROM} gezeigt, gegen 0"),
 }
 
 
@@ -515,8 +549,13 @@ def next_text(missing: list[dict]) -> str:
 
 
 def judge(c: dict, ctx: dict, now: int) -> dict:
-    steps = {1: idea(c, ctx), 2: tested(c, ctx), 3: shadow(c, ctx), 4: lockbox(c, ctx), 5: execution(c, ctx, now),
-             6: [cond("owner", False, "the ladder never sets this step")]}
+    if c["kind"] == "rule":
+        c = {**c, "first_day": ctx["pf"]["first"].get(c["name"])}
+        steps = {1: idea(c, ctx), 2: pf_tested(c, ctx), 3: pf_shadow(c, ctx), 4: pf_lockbox(c, ctx),
+                 5: pf_execution(c, ctx)}
+    else:
+        steps = {1: idea(c, ctx), 2: tested(c, ctx), 3: shadow(c, ctx), 4: lockbox(c, ctx), 5: execution(c, ctx, now)}
+    steps[6] = [cond("owner", False, "the ladder never sets this step")]
     step, missing, opened = climb(steps)
     ev = next((x["path"] for x in missing if x["path"]), "") or next(
         (x["path"] for x in reversed(steps.get(step, [])) if x["path"]), "")
@@ -527,8 +566,10 @@ def judge(c: dict, ctx: dict, now: int) -> dict:
             "next_de": "kein getesteter Bericht" if missing and all(x["value"] == NO_RECORD for x in missing)
             else "; ".join(COND[x["id"]][1] for x in missing),
             "missing": [x["id"] for x in missing], "open": [x["id"] for x in opened], "evidence": ev,
-            "tainted": c.get("tainted") or 0, **({"p3": p3_row(c["p3"])} if c.get("p3") else {}),
+            "tainted": (ctx["pf"]["rules"][c["name"]]["tainted"] if c["kind"] == "rule" else c.get("tainted")) or 0,
+            **({"p3": p3_row(c["p3"])} if c.get("p3") else {}),
             **({"eq1": eq1_row(c, ctx)} if c.get("study") == "EQ1" else {}),
+            **({"pumpfun": pf_row(c, ctx)} if c["kind"] == "rule" else {}),
             "steps": {str(k): v for k, v in steps.items()}}
 
 
@@ -536,6 +577,238 @@ def p3_row(b: dict) -> dict:
     """What the ladder shows of a P3 book: its wallet in EUR, trades, mean and median per trade after all costs, the
     band, days, the gate."""
     return {k: b.get(k) for k in ("eur", "sol", "trades", "mean", "median", "band", "days", "pass", "can_pay")}
+
+
+# ---------------------------------------------------------------- the pump.fun rules, per trade
+
+def pf_trials() -> list[dict]:
+    return [{"id": f"pumpfun:ladder:{r}", "family": "pumpfun", "n": 1, "sharpe": None, "source": PF_PREREG}
+            for r in PF_RULES]
+
+
+def _rows(p: Path, keep) -> tuple[list[dict], bool]:
+    """The rows of a paper CSV whose first column (rule) is in keep, and whether the file was read."""
+    try:
+        with p.open(encoding="utf-8", newline="") as f:
+            rd = csv.reader(f)
+            head = next(rd, [])
+            return [dict(zip(head, r)) for r in rd if r and r[0] in keep], True
+    except (OSError, csv.Error):
+        return [], False
+
+
+def pf_entries(rows: list[dict], fails: list[dict], since_ms: int) -> tuple[list[tuple[int, float]], int]:
+    """One rule's entries since since_ms in signal order, (signal_ms, return): its closed trades (ret, every cost of
+    the fit in it) less P1's tainted rows and the restart closes, and its failed buys (the fee over the median stake of
+    its trades); and how many tainted rows were left out."""
+    from ..pumpfun_rt import realistic as R
+    out, stakes, bad = [], [], 0
+    for r in rows:
+        sig, ret = R._f(r.get("signal_ms")), R._f(r.get("ret"))
+        if sig is None or ret is None or sig < since_ms or r.get("exit_why") == "restart":
+            continue
+        if R.tainted(r):
+            bad += 1
+            continue
+        out.append((int(sig), ret))
+        stakes.append(R._f(r.get("stake_sol")) or 0.0)
+    st = float(np.median([x for x in stakes if x > 0])) if any(x > 0 for x in stakes) else 0.0
+    for x in fails:
+        sig, pnl = R._f(x.get("signal_ms")), R._f(x.get("pnl_sol"))
+        if sig is not None and pnl is not None and sig >= since_ms and st > 0:
+            out.append((int(sig), pnl / st))
+    return sorted(out), bad
+
+
+def pf_record(entries: list[tuple[int, float]], now: int, n_all: int | None, n_fam: int | None,
+              sharpes: list[float] | None) -> dict:
+    """R7's numbers of one rule's entries (factory.by_day, factory.deflated over n_all and n_fam with F3's per-entry
+    Sharpes as the noise), T8's e-process on the day sums (step 3 after the first PF_REF_DAYS days, step 4 on the
+    days from PF_FRESH_FROM on) and the days still needed at its current mean."""
+    from ..paper import power
+    from ..pumpfun_rt import factory as F
+    from scipy import stats as st
+    x = np.array([r for _, r in entries], dtype=float)
+    n = len(x)
+    out = {"entries": n, "days_record": (now - entries[0][0]) / DAY_MS if n else 0.0, "mean": None, "lo": None,
+           "hi": None, "n_eff": 0.0, "days_traded": 0, "sharpe": 0.0, "dsr_all": None, "dsr_family": None,
+           "e": None, "e_fresh": None, "edge_day": None, "fresh_day": None, "to_bar": None, "to_power": None}
+    if not n:
+        return out
+    days = sorted({_day(t) for t, _ in entries})
+    idx = {d: i for i, d in enumerate(days)}
+    day = np.array([idx[_day(t)] for t, _ in entries], dtype=int)
+    sd = float(x.std(ddof=1)) if n > 1 else 0.0
+    r = {"entries": n, "sharpe": float(x.mean() / sd) if sd > 0 else 0.0,
+         "skew": float(((x - x.mean()) ** 3).mean() / sd ** 3) if sd > 0 else 0.0,
+         "kurt": float(((x - x.mean()) ** 4).mean() / sd ** 4) if sd > 0 else 3.0} | F.by_day(x, day, len(days))
+    out.update({"mean": float(x.mean()), "lo": r["lo"], "hi": r["hi"], "n_eff": r["n_eff"],
+                "days_traded": r["days_traded"], "sharpe": r["sharpe"]})
+    ok = sharpes is not None and len([v for v in sharpes if math.isfinite(v)]) >= 2
+    if ok and n_all:
+        out["dsr_all"] = F.deflated(r, sharpes, n_all)
+    if ok and n_fam:
+        out["dsr_family"] = F.deflated(r, sharpes, n_fam)
+    ys = np.array(r["day_pnl"], dtype=float)                  # the day sums of the entries' returns
+    if len(days) > PF_REF_DAYS and float(np.mean(ys[:PF_REF_DAYS] ** 2)) > 0:
+        ref = day < PF_REF_DAYS
+        per_day = F.by_day(x[ref], day[ref], PF_REF_DAYS)["n_eff"] / PF_REF_DAYS
+        if per_day > 0:
+            horizon = (power.z_sum() / PF_REF_SHARPE) ** 2 / per_day
+            rho = power.rho_for(float(np.mean(ys[:PF_REF_DAYS] ** 2)), horizon)
+            e = power.e_path(ys[PF_REF_DAYS:], rho)
+            k = power.first_cross(e)
+            out.update({"e": float(e[-1]), "edge_day": days[PF_REF_DAYS + k] if k is not None else None})
+            fresh = [i for i in range(PF_REF_DAYS, len(days)) if days[i] >= PF_FRESH_FROM]
+            if fresh:
+                ef = power.e_path(ys[fresh], rho)
+                k = power.first_cross(ef)
+                out.update({"e_fresh": float(ef[-1]), "fresh_day": days[fresh[k]] if k is not None else None})
+    rate = r["n_eff"] / out["days_record"] if out["days_record"] > 0 else 0.0
+    s = r["sharpe"]
+    if rate > 0 and ok and n_all:
+        sr0 = F.bar(sharpes, n_all)
+        q = 1 - r["skew"] * s + (r["kurt"] - 1) / 4 * s ** 2
+        need = 1 + (float(st.norm.ppf(F.BAR_P)) * math.sqrt(q) / (s - sr0)) ** 2 if s > sr0 and q > 0 else math.inf
+        out["to_bar"] = max(need / rate - out["days_record"], PF_MIN_DAYS - r["days_traded"], 0.0)
+    if rate > 0:
+        need = power.fixed_days(s)                           # (z_0.95 + z_0.80)^2 / S^2 entries, inf at S <= 0
+        out["to_power"] = max(need / rate - out["days_record"], PF_REF_DAYS + 1 - r["days_traded"], 0.0)
+    return out
+
+
+def pf_context(root: Path, now: int) -> dict:
+    """What the pump.fun rules' steps read, once: each rule's record (pf_record) from the paper ledger since realistic
+    execution began, the lat 2x stress of the real-time report, P2's selection gap and P3's books of realistic.json,
+    R5's pool with pf_trials and F3's ledger."""
+    from ..pumpfun_rt import factory as F
+    paper = root / "paper" / "pumpfun_rt"
+    st = notify.read_json(paper / "state.json")
+    since = max(PF_REAL_FROM_MS, int(_num((st or {}).get("realistic_since")) or 0) if isinstance(st, dict) else 0)
+    rows, read = _rows(paper / "ledger.csv", PF_RULES)
+    fails, _ = _rows(paper / "failed.csv", PF_RULES)
+    f3 = F.read_ledger(root / "pumpfun_rt" / "factory" / "ledger.jsonl")
+    sharpes, n_f3 = F.pool(f3)
+    n_all = n_fam = None
+    try:
+        from .. import metrics
+        p = metrics.trial_pool(extra=pf_trials())
+        n_all = p["n_trials"] + n_f3
+        n_fam = p["families"].get("pumpfun", {}).get("n_trials", 0) + n_f3
+    except Exception:  # noqa: BLE001 - fails closed: no pool, no DSR passes
+        pass
+    lt = notify.read_json(root / "reports" / "pumpfun_rt" / "latest.json")
+    lat = {}
+    for r in (lt or {}).get("results") or [] if isinstance(lt, dict) else []:
+        m = _num((((r or {}).get("stress") or {}).get("lat2x") or {}).get("mean")) if isinstance(r, dict) else None
+        if m is not None:
+            lat[r.get("rule")] = m
+    rj = notify.read_json(root / PF_REPORT)
+    rj = rj if isinstance(rj, dict) else {}
+    out = {"read": read, "since": since, "n_all": n_all, "n_fam": n_fam, "n_f3": n_f3, "lat2x": lat,
+           "selection": rj.get("selection") if isinstance(rj.get("selection"), dict) else None,
+           "ten": {str(t.get("book")): t for t in rj.get("ten") or [] if isinstance(t, dict)}, "rules": {},
+           "first": {}}
+    for r in rows:                                            # step 1's first number: the rule's first ledger day
+        t = _num(int(r["signal_ms"])) if str(r.get("signal_ms") or "").isdigit() else None
+        if t is not None and (r["rule"] not in out["first"] or _day(t) < out["first"][r["rule"]]):
+            out["first"][r["rule"]] = _day(t)
+    for rule, (_, real) in PF_RULES.items():
+        es, bad = pf_entries([r for r in rows if r.get("rule") == rule], [x for x in fails if x.get("rule") == rule],
+                             since) if real else ([], 0)
+        out["rules"][rule] = {**pf_record(es, now, n_all, n_fam, sharpes if len(sharpes) >= 2 else None),
+                              "tainted": bad, "realistic": real}
+    return out
+
+
+def _pc(x) -> str:
+    return "n/a" if _num(x) is None else f"{x * 100:+.1f} %"
+
+
+def pf_tested(c: dict, ctx: dict) -> list[dict]:
+    """Step 2 of a pump.fun rule: P1 out, lat 2x above 0, realistic execution, R7's entries and days, both DSRs."""
+    pf, p = ctx["pf"], PF_LEDGER
+    x = pf["rules"][c["name"]]
+    out = [cond("pf_taint", pf["read"], f"{x['tainted']} tainted rows left out (P1)" if pf["read"] else
+                "no paper ledger", p)]
+    lat = pf["lat2x"].get(c["name"])
+    out.append(cond("pf_late", lat is not None and lat > 0, "not in the real-time report" if lat is None else
+                    f"{_pc(lat)} a trade at twice the latency (lat 2x, out of sample)", "reports/pumpfun_rt/latest.json"))
+    if not x["realistic"]:
+        why = "no realistic record: it runs on the old paper model only"
+        return out + [cond("pf_era", False, why, p), cond("pf_scored", False, why, p), cond("dsr_all", False, why, p),
+                      cond("dsr_family", False, why, p)]
+    out.append(cond("pf_era", x["entries"] > 0, f"realistic since {_day(pf['since'])}, {x['entries']} entries", p))
+    out.append(cond("pf_scored", x["entries"] >= PF_MIN_ENTRIES and x["days_traded"] >= PF_MIN_DAYS,
+                    f"{x['entries']} entries on {x['days_traded']} of {PF_MIN_DAYS} days", p))
+    for k, n, what in (("dsr_all", pf["n_all"], "trials"), ("dsr_family", pf["n_fam"], "pumpfun trials")):
+        v = x[k]
+        out.append(cond(k, v is not None and v >= DSR_PASS, "no pool (R5 or F3's ledger unreadable)" if v is None
+                        else f"{v:.3f} per entry over {n:,} {what}, {x['n_eff']:.0f} effective entries "
+                             "(higher is better)", p))
+    return out
+
+
+def pf_shadow(c: dict, ctx: dict) -> list[dict]:
+    x = ctx["pf"]["rules"][c["name"]]
+    e = x["e"]
+    v = (f"edge shown on {x['edge_day']}" if x["edge_day"] else f"E {e:.2f} of 20") if e is not None else \
+        f"no test before {PF_REF_DAYS + 1} days with entries"
+    return [cond("pf_edge", bool(x["edge_day"]), v, PF_LEDGER)]
+
+
+def pf_lockbox(c: dict, ctx: dict) -> list[dict]:
+    x = ctx["pf"]["rules"][c["name"]]
+    e = x["e_fresh"]
+    v = (f"edge shown on {x['fresh_day']}" if x["fresh_day"] else f"E {e:.2f} of 20") if e is not None else \
+        f"no day from {PF_FRESH_FROM} on after the first {PF_REF_DAYS}"
+    return [cond("pf_fresh", bool(x["fresh_day"]), v, PF_LEDGER)]
+
+
+def pf_execution(c: dict, ctx: dict) -> list[dict]:
+    """Step 5: P2's selection gap (under 2 points) and P3's gate of the rule's 10 EUR book; absent is open."""
+    pf, p = ctx["pf"], PF_REPORT
+    sel = pf["selection"]
+    pts = _num((sel or {}).get("pts"))
+    gap = cond("p3_gap", None, "open: no P2 selection gap in realistic.json", p) if sel is None else \
+        cond("p3_gap", sel.get("pass") is True, "not measured" if pts is None else f"{pts:+.1f} points (P2)", p)
+    ten = pf["ten"].get(f"{c['name']}_10eur")
+    if ten is None:
+        return [gap, cond("p3_book", None, "open: no 10 EUR paper book (P3) for it", p)]
+    return [gap] + [x for x in p3_gate({"p3": ten}) if x["id"] != "p3_gap"]
+
+
+def pf_row(c: dict, ctx: dict) -> dict:
+    x = ctx["pf"]["rules"][c["name"]]
+    return {k: x[k] for k in ("days_record", "entries", "n_eff", "days_traded", "mean", "lo", "hi", "dsr_all",
+                              "dsr_family", "e", "e_fresh", "to_bar", "to_power", "tainted", "realistic")}
+
+
+def _days_left(v) -> str:
+    if v is None:
+        return "n/a"
+    return "never at its mean" if not math.isfinite(v) else f"{v:,.0f}"
+
+
+def pf_md(rows: list[dict]) -> list[str]:
+    if not rows:
+        return []
+    md = ["", f"pump.fun rules per trade ({PF_PREREG}): the realistic paper record since "
+          f"{_day(PF_REAL_FROM_MS)} 01:43 UTC, P1's tainted rows out; mean per entry with R7's band (clustered by UTC "
+          f"day); DSR per entry over R5 and F3's trials, all / pumpfun (higher is better, pass at {DSR_PASS}); E: T8's "
+          "e-process on the day sums (edge at 20); days still needed at the current mean per entry to step 2's bar "
+          "and to T8's power at 0.", "",
+          "| rule | step | next missing | days of record | entries (effective) | mean per entry | band | DSR | E | "
+          "days needed: bar / power |", "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        x = r["pumpfun"]
+        dsr = "n/a" if x["dsr_all"] is None else f"{x['dsr_all']:.3f} / {x['dsr_family']:.3f}"
+        cells = [r["name"], f"{r['step']} {r['step_name']}", r["next"] or "-", f"{x['days_record']:.1f}",
+                 f"{x['entries']} ({x['n_eff']:.0f})", _pc(x["mean"]),
+                 "n/a" if x["lo"] is None else f"{_pc(x['lo'])} to {_pc(x['hi'])}", dsr,
+                 "n/a" if x["e"] is None else f"{x['e']:.2f}", f"{_days_left(x['to_bar'])} / {_days_left(x['to_power'])}"]
+        md.append("| " + " | ".join(notify.nodash(str(v)).replace("|", "/") for v in cells) + " |")
+    return md
 
 
 # ---------------------------------------------------------------- the candidates
@@ -616,6 +889,10 @@ def candidates(root: Path, now: int) -> list[dict]:
                                  "kind": "model", "study": "G2", "source": "G2", "bench": "crypto", "prereg": None,
                                  "family": "hand", "key": None, "days_logged": _num(m.get("scored_days")),
                                  "days_path": "reports/models/factory.json", "first_day": m.get("added_day")}
+    if (root / PF_LEDGER).exists() or (root / PF_REPORT).exists():
+        for rule, (pre, _) in PF_RULES.items():
+            out[f"pumpfun:{rule}"] = {"id": f"pumpfun:{rule}", "name": rule, "kind": "rule", "study": "PF",
+                                      "source": "pumpfun", "bench": "pumpfun", "prereg": pre, "family": "pumpfun"}
     return list(out.values())
 
 
@@ -635,7 +912,7 @@ def genome(source: str, h: dict, path: str, kind: str) -> dict:
 
 # ---------------------------------------------------------------- what the steps read, once
 
-def context(root: Path, results: Path = RESULTS, added=None) -> dict:
+def context(root: Path, results: Path = RESULTS, added=None, now: int | None = None) -> dict:
     fac = root / "factory"
     pbo: dict = {}
     for source, d in (("weekly", fac / "runs"), ("F2", fac / "small" / "runs")):
@@ -651,7 +928,10 @@ def context(root: Path, results: Path = RESULTS, added=None) -> dict:
     eq = notify.read_json(results / EQ1_JSON)
     eq = {**eq, "rows": {(r.get("book"), r.get("variant"), r.get("broker")): r for r in eq.get("rows") or []
                          if isinstance(r, dict)}} if isinstance(eq, dict) else {}
+    pf = pf_context(root, now or notify.clock_ms()) if (root / PF_LEDGER).exists() or (root / PF_REPORT).exists() \
+        else None
     return {"results": results, "eq1": eq, "added": added or git_added, "r10": r10, "pbo": pbo, "pool": today_pool(),
+            "pf": pf,
             "leaks": {"weekly": {x.get("key") for x in _jsonl(fac / "leaks.jsonl")},
                       "F2": {x.get("key") for x in _jsonl(fac / "small" / "leaks.jsonl")}},
             "leak_ok": {s: {x["key"]: str(x.get("date") or "") for x in _jsonl(d / "leak_passed.jsonl")
@@ -685,7 +965,7 @@ def today_pool() -> dict | None:
 def build(root: Path | None = None, now: int | None = None, results: Path = RESULTS, added=None) -> dict:
     root = Path(root) if root is not None else notify.data_root()
     now = now or notify.clock_ms()
-    ctx = context(root, results, added)
+    ctx = context(root, results, added, now)
     rows = sorted((judge(c, ctx, now) for c in candidates(root, now)), key=lambda r: (-r["step"], len(r["missing"]), r["name"].lower()))
     counts = {str(k): sum(1 for r in rows if r["step"] == k) for k in STEPS}
     top = rows[0]["step"] if rows else 0
@@ -759,6 +1039,7 @@ def markdown(d: dict) -> str:
                      "n/a" if _num(x.get("equity_eur")) is None else
                      f"{x['equity_eur']:.2f} ({_num(x.get('paid_eur')) or 0:.0f})"]
             md.append("| " + " | ".join(notify.nodash(str(v)).replace("|", "/") for v in cells) + " |")
+    md += pf_md([r for r in d["rows"] if r.get("pumpfun")])
     if d.get("tainted"):
         md.append(f"\nThe pump.fun books' evidence leaves out {d['tainted']} paper trades the late-row bug made (P1, "
                   "results/pumpfun_ledger_taint_p1.md).")
@@ -770,6 +1051,9 @@ def out_dir() -> Path:
 
 
 def publish(d: dict) -> None:
+    if any(r.get("kind") == "rule" for r in d.get("rows") or []):
+        from .. import metrics
+        metrics.register(pf_trials())                         # the pump.fun rules' five trials, before the numbers
     notify.write_json(out_dir() / "latest.json", d)
     (out_dir() / "latest.md").write_text(markdown(d), encoding="utf-8")
 
