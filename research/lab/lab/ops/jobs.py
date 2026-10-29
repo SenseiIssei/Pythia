@@ -626,7 +626,9 @@ def write_cron(t: Table, dry_run: bool = False, prune_legacy: bool = False) -> l
         marker.write_text(now + "\n")
     live = _read_json(t.ops_dir / "installed.json") or {}
     for job in t.jobs.values():
-        active = job["enabled"] and job["cron"] is not None and held(t, job) is None
+        # a job that runs after others counts from its own install too, else a new one looked late for its
+        # dependencies' earlier runs (exec-dryrun, 2026-10-28)
+        active = job["enabled"] and (job["cron"] is not None or job["depends_on"]) and held(t, job) is None
         if active:
             live.setdefault(job["name"], now)
         else:

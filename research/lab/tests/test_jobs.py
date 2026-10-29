@@ -602,6 +602,20 @@ def test_fires_before_install_are_not_late(tmp_path):
     assert s["jobs"][0]["state"] == "late"
 
 
+def test_a_new_job_after_others_is_not_late_for_their_earlier_runs(tmp_path, monkeypatch):
+    t = table(tmp_path, '  - name: a\n    schedule: "0 4 * * *"\n    command: x\n'
+                        '  - name: b\n    depends_on: [a]\n    command: y')
+    t.ops_dir.mkdir(parents=True)
+    (t.ops_dir / "installed_at").write_text("2026-10-01T00:00:00Z\n")      # the table went live long ago
+    jobs.append_record(t, {"job": "a", "start": "2026-10-15T04:00:00Z", "end": "2026-10-15T04:05:00Z",
+                           "status": "ok", "exit_code": 0})
+    monkeypatch.setenv("PYTHIA_JOBS_NOW", "2026-10-15T10:00:00Z")           # b comes in after a's run
+    jobs.write_cron(t)
+    assert json.loads((t.ops_dir / "installed.json").read_text())["b"] == "2026-10-15T10:00:00Z"
+    s = {j["name"]: j for j in jobs.build_status(t, datetime(2026, 10, 15, 12, 0, tzinfo=UTC))["jobs"]}
+    assert s["b"]["state"] == "never" and s["b"]["ok"], "not late for a run of a from before it existed"
+
+
 def test_running_and_stuck(tmp_path):
     t = table(tmp_path, '  - name: a\n    schedule: "0 4 * * *"\n    command: x\n    timeout: 1h')
     jobs._write_json(jobs._running_path(t, "a"), {"pid": os.getpid(), "start": "2026-10-15T04:00:00Z"})
@@ -1063,6 +1077,16 @@ def test_deploy_lab_keeps_results_and_checks_the_manifest(tmp_path):
     r = deploy()
     assert r.returncode == 0 and "0 new files added" in r.stdout, r.stderr
     assert (dest / "results" / "server_only.md").read_text() == "mine"
+    # a seed ledger the repo has grown is extended on the server; one the server changed is kept
+    (src / "results" / "factory_seed" / "ledger.jsonl").write_text('{}\n{"g": 2}\n')
+    r = deploy()
+    assert r.returncode == 0 and "1 seed ledgers extended" in r.stdout, r.stderr
+    assert (dest / "results" / "factory_seed" / "ledger.jsonl").read_text() == '{}\n{"g": 2}\n'
+    (dest / "results" / "factory_seed" / "ledger.jsonl").write_text('{"server": 1}\n')
+    (src / "results" / "factory_seed" / "ledger.jsonl").write_text('{}\n{"g": 2}\n{"g": 3}\n')
+    r = deploy()
+    assert r.returncode == 0 and "0 seed ledgers extended" in r.stdout and "not a prefix" in r.stderr
+    assert (dest / "results" / "factory_seed" / "ledger.jsonl").read_text() == '{"server": 1}\n'
     # dry run changes nothing
     (src / "lab" / "y.py").write_text("")
     assert deploy("--dry-run").returncode == 0 and not (dest / "lab" / "y.py").exists()

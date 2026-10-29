@@ -13,7 +13,11 @@
 #      (excluded paths are neither copied nor deleted on the destination);
 #   3. adds the repo's results/ and proposals/ files the destination does not
 #      have yet (a seed like results/factory_seed, a new study's write-up),
-#      never replacing or deleting one that is there;
+#      never replacing or deleting one that is there; a seed ledger
+#      (results/*_seed/*.jsonl, append only) the repo has grown is extended on
+#      the destination when the server's file is an exact prefix of the repo's
+#      (2026-10-29: the G1 run's 300 genomes never reached the server, so the
+#      trial count was 300 short), else kept and said;
 #   4. writes a sha256 manifest of the code sent (.deploy-manifest) and checks
 #      every file on the destination against it;
 #   5. checks that every file results/ had before is still there unchanged
@@ -106,6 +110,29 @@ add_results() { # extra rsync flags
   fi
 }
 
+# Seed ledgers only ever grow: the repo's longer copy extends the server's when the server's is its prefix.
+# Runs before the snapshot below, so step 5 still checks that nothing else in results/ changed.
+grow_seeds() {
+  local n=0 f rel d s
+  if [ -d "$src/results" ] && [ -d "$dest/results" ]; then
+    while IFS= read -r -d '' f; do
+      rel=${f#"$src/results/"}
+      d="$dest/results/$rel"
+      [ -f "$d" ] || continue
+      cmp -s "$f" "$d" && continue
+      s=$(stat -c %s "$d")
+      [ "$(stat -c %s "$f")" -gt "$s" ] || continue
+      if cmp -s -n "$s" "$f" "$d"; then
+        tail -c +"$((s + 1))" "$f" >> "$d"
+        n=$((n + 1))
+      else
+        echo "deploy_lab: results/$rel on $dest is not a prefix of the repo's: kept as it is" >&2
+      fi
+    done < <(find "$src/results" -path '*_seed/*.jsonl' -type f -print0)
+  fi
+  echo "$n"
+}
+
 if [ "$dry" = true ]; then
   echo "deploy_lab: dry run, $src -> $dest"
   rsync -a --delete --dry-run --itemize-changes "${rsync_ex[@]}" "$src/" "$dest/"
@@ -115,6 +142,7 @@ if [ "$dry" = true ]; then
 fi
 
 mkdir -p "$dest"
+grown=$(grow_seeds)
 before=$(snapshot)
 manifest=$(mktemp)
 trap 'rm -f "$manifest"' EXIT
@@ -148,4 +176,4 @@ files=$(wc -l < "$manifest" | tr -d ' ')
 printf '{"at":"%s","commit":"%s","files":%s,"manifestSha256":"%s"}\n' \
   "$(date -u +%FT%TZ)" "$commit" "$files" "$(sha256sum "$dest/.deploy-manifest" | cut -d' ' -f1)" \
   > "$dest/.deploy-info"
-echo "deploy_lab: $files files at $commit deployed to $dest, manifest ok; results/ kept, ${added:-0} new files added"
+echo "deploy_lab: $files files at $commit deployed to $dest, manifest ok; results/ kept, ${added:-0} new files added, ${grown:-0} seed ledgers extended"
