@@ -1050,8 +1050,7 @@ jobs:
     description: dry run of a buy and a buy-then-sell for the pump.fun live wallet (nothing signed or sent) so the live gate stays current
     schedule: "7 */6 * * *"
     command: python -m lab.pumpfun_rt.live_exec simulate
-    enabled: false
-    # off since 2026-10-26: the owner switched the live bot off (its wallet is empty)
+    # on again 2026-10-29: the owner's 20 EUR live test (/root/pumpfun-start-20.sh on the server)
     env_file: /etc/pythia/pumpfun-live.env?
     code: false
     volumes: [/opt/pythia-live:/app:ro, /etc/pythia/pumpfun-live-ack:/etc/pythia/pumpfun-live-ack:ro, /etc/pythia/pumpfun-keypair.json.pub:/etc/pythia/pumpfun-keypair.json.pub:ro]
