@@ -431,6 +431,9 @@ def test_markets_run_paces_gecko_backs_off_once_on_429_then_stops(tmp_path, monk
     clock, slept, urls = [0.0], [], []
     monkeypatch.setattr(L.time, "sleep", lambda s: (slept.append(s), clock.__setitem__(0, clock[0] + s)))
     monkeypatch.setattr(L.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(L.time, "time", lambda: clock[0])                # the shared pace's wall clock
+    from lab import hostpace as HP
+    monkeypatch.setattr(HP, "GAPS", {"api.geckoterminal.com": 2.5})     # the shared gap no wider than the run's
     g = FakeGecko(now, T0 - 10 * DAY)
 
     def urlopen(req, timeout):
@@ -445,6 +448,7 @@ def test_markets_run_paces_gecko_backs_off_once_on_429_then_stops(tmp_path, monk
     assert "stopped on HTTP 429, cursor saved" in res["said"] and "after one backoff" in res["errors"][0]
     cur = json.loads((root / "candles" / L.CURSOR).read_text())
     assert cur["left"][0] == "1h/SPYx" and len(cur["left"]) == res["gecko_left"] and cur["stopped"] == "HTTP 429"
+    assert json.loads((root / "ratelimit" / "api.geckoterminal.com.lock").read_text())["last"] == clock[0]
 
 
 # ---------------------------------------------------------------- Yahoo
@@ -507,6 +511,55 @@ def test_http_paces_budgets_and_stops_a_host_after_a_429():
         h("https://b.example/bad")
     with pytest.raises(L.RateLimited):
         h("https://b.example/fine")
+
+
+def test_two_processes_never_call_geckoterminal_closer_than_the_shared_gap(tmp_path, monkeypatch):
+    """2026-10-29: candles-markets (6 s gap) and pumpfun (6.5 s) each paced only their own calls, so together they
+    asked GeckoTerminal's shared keyless quota about 19 times a minute, got 429 after 4 calls and the pools went
+    stale. Now both take each call's slot from one file under the write root: two Http objects (the two jobs, each
+    with its own pace object, as two processes have) on one fake clock never call closer than the shared gap."""
+    from lab import hostpace as HP
+    from lab.paper import pumpfun as pf
+    clock, calls = [1_000.0], []
+
+    def sleep(s):
+        clock[0] += s
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(req, timeout=None):
+        calls.append((clock[0], req.full_url))
+        return Resp(b"{}")
+    monkeypatch.setattr(L.time, "sleep", sleep)                          # pumpfun's Http sleeps on time itself
+    monkeypatch.setattr(L.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(L.time, "time", lambda: clock[0])
+    monkeypatch.setattr(pf.urllib.request, "urlopen", opener)
+    folder = tmp_path / "w" / "ratelimit"
+    candles = L.Http(gaps={"api.geckoterminal.com": 6.0}, sleep=sleep, clock=lambda: clock[0], opener=opener,
+                     pace=HP.HostPace(folder, clock=lambda: clock[0], sleep=sleep))
+    pump = pf.Http(pace=HP.HostPace(folder, clock=lambda: clock[0], sleep=sleep))
+    for i in range(6):
+        candles(f"{L.GECKO}/pools/c{i}/ohlcv/hour")
+        pump(f"{pf.GT}/networks/solana/new_pools?page={i}")
+        if i == 2:
+            clock[0] += 0.5                                               # some work between calls
+    gap = HP.GAPS["api.geckoterminal.com"]
+    ts = [t for t, _ in calls]
+    assert len(ts) == 12 and len({u.split("/")[2] for _, u in calls}) == 1 and gap >= 7.5
+    assert min(b - a for a, b in zip(ts, ts[1:])) >= gap - 1e-9, "both jobs together under 8 calls a minute"
+    assert sum(1 for t in ts if t < ts[0] + 60) <= 8
+    assert json.loads((folder / "api.geckoterminal.com.lock").read_text())["last"] == ts[-1]
+    other = L.Http(sleep=sleep, clock=lambda: clock[0], opener=opener, pace=HP.HostPace(folder, clock=lambda: clock[0], sleep=sleep))
+    other("https://a.example/x")                                          # a host not in the shared gaps: no wait
+    assert calls[-1][0] == ts[-1] and not (folder / "a.example.lock").exists()
+    ro = tmp_path / "ro"
+    ro.write_text("")                                                     # a file, so no folder can be made there
+    assert HP.HostPace(ro / "ratelimit", clock=lambda: clock[0], sleep=sleep).wait("api.geckoterminal.com") == 0.0
 
 
 def test_health_is_red_when_a_live_source_is_stale(tmp_path, monkeypatch):

@@ -16,7 +16,8 @@ recorder has received a minute past their end; open/high/low/close by exchange t
 volume, trades, the buy side (Kraken's side is the taker's) as taker buy volume, VWAP. The minutes stay in
 the store when the recorder's retention removes the raw trades.
 
-GeckoTerminal (polite: one call per gecko_gap_s, gecko_calls_per_run calls and gecko_run_s seconds a run; a
+GeckoTerminal (polite: one call per gecko_gap_s and, with pumpfun's calls, one per lab.hostpace's gap across
+processes (they share the keyless quota), gecko_calls_per_run calls and gecko_run_s seconds a run; a
 429 waits once, Retry-After or at most gecko_retry_s, the next ends the run's calls to it and backs it off 2
 minutes, doubling to 30, while 429s go on): the pool of a token is the deepest against USDC or SOL, looked up
 every pool_refresh_days; the pools' liquidity in one /pools/multi call a run, put on the newest closed bar;
@@ -44,6 +45,7 @@ from pathlib import Path
 import polars as pl
 
 from .. import data
+from ..hostpace import HostPace
 from . import store as S
 
 MIN, HOUR, DAY = S.MIN, S.HOUR, S.DAY
@@ -62,10 +64,11 @@ class RateLimited(OSError):
 
 class Http:
     """GET JSON with a minimum gap and a call budget per host; a 429 waits once (Retry-After, at most the host's
-    retry_429 seconds, none without one) and asks again, the next blocks the host for the rest of the run."""
+    retry_429 seconds, none without one) and asks again, the next blocks the host for the rest of the run. With a
+    pace (lab.hostpace) a call also waits for its host's gap since any other process's last call (pumpfun's)."""
 
     def __init__(self, gaps: dict[str, float] | None = None, budgets: dict[str, int] | None = None,
-                 sleep=None, clock=None, opener=None, retry_429: dict[str, float] | None = None):
+                 sleep=None, clock=None, opener=None, retry_429: dict[str, float] | None = None, pace=None):
         self.gaps, self.budgets, self.retry_429 = gaps or {}, budgets or {}, retry_429 or {}
         self.calls: dict[str, int] = {}
         self.last: dict[str, float] = {}
@@ -73,6 +76,7 @@ class Http:
         self.retried: set[str] = set()
         self.sleep, self.clock = sleep or time.sleep, clock or time.monotonic
         self.opener = opener or urllib.request.urlopen
+        self.pace = pace
 
     def __call__(self, url: str):
         host = url.split("/")[2]
@@ -84,6 +88,8 @@ class Http:
             wait = self.last.get(host, -1e9) + self.gaps.get(host, 0.0) - self.clock()
             if wait > 0:
                 self.sleep(wait)
+            if self.pace is not None:
+                self.pace.wait(host)
             self.last[host] = self.clock()
             self.calls[host] = self.calls.get(host, 0) + 1
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (pythia-lab candles, read only)",
@@ -524,7 +530,8 @@ def run_markets(get=None, now: int | None = None, root: Path | None = None, toke
     cfg, now = S.config(), now or S.now_us()
     get = get or Http(gaps={"api.geckoterminal.com": float(cfg.get("gecko_gap_s", 6.0)), "query1.finance.yahoo.com": 1.0},
                       budgets={"api.geckoterminal.com": int(cfg.get("gecko_calls_per_run", 40))},
-                      retry_429={"api.geckoterminal.com": float(cfg.get("gecko_retry_s", 60))})
+                      retry_429={"api.geckoterminal.com": float(cfg.get("gecko_retry_s", 60))},
+                      pace=HostPace((root or data.WRITE_ROOT) / "ratelimit"))
     state = load_state(root)
     g = run_gecko(get, cfg, state, now, root, tokens_csv)
     y = run_yahoo(get, cfg, state, now, root)

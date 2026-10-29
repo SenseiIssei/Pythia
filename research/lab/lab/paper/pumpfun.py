@@ -119,6 +119,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..data import ROOT, WRITE_ROOT
+from ..hostpace import HostPace
 from ..ops import i18n as _i18n
 
 NAME = "pumpfun"
@@ -163,14 +164,16 @@ class RateLimited(OSError):
 
 
 class Http:
-    """Spaced, budgeted GET of JSON per host. A 429 blocks the host for the run."""
+    """Spaced, budgeted GET of JSON per host. A 429 blocks the host for the run. GeckoTerminal also waits for
+    lab.hostpace's gap since any other process's last call (candles-markets shares the keyless quota)."""
 
-    def __init__(self, gaps: dict[str, float] | None = None, budgets: dict[str, int] | None = None):
+    def __init__(self, gaps: dict[str, float] | None = None, budgets: dict[str, int] | None = None, pace=None):
         self.gaps = gaps or {"api.geckoterminal.com": GT_GAP_S, "api.dexscreener.com": DS_GAP_S}
         self.budgets = dict(budgets or {"api.geckoterminal.com": GT_MAX_CALLS, "api.dexscreener.com": DS_MAX_CALLS})
         self.last: dict[str, float] = {}
         self.blocked: set[str] = set()
         self.calls: dict[str, int] = {}
+        self.pace = pace or HostPace(WRITE_ROOT / "ratelimit")
 
     def __call__(self, url: str):
         host = urllib.parse.urlsplit(url).netloc
@@ -181,6 +184,7 @@ class Http:
         wait = self.last.get(host, 0.0) + self.gaps.get(host, 1.0) - time.monotonic()
         if wait > 0:
             time.sleep(wait)
+        self.pace.wait(host)
         self.last[host] = time.monotonic()
         self.calls[host] = self.calls.get(host, 0) + 1
         req = urllib.request.Request(url, headers={"User-Agent": "pythia-lab (paper research, read only)",
