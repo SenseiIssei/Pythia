@@ -300,6 +300,21 @@ jobs:
     lock: heavy
     lock_wait: 2h
 
+  # M4H (results/m4h.md): M4 reg7n 10/10 at a 230 USD account on the coins
+  # Hyperliquid lists, an experiment (passes M4H2's registered checks, fails
+  # deflation). Paper only: marks to Hyperliquid's public prices and funding,
+  # writes the orders a bot would send (lab.paper.hl_dryrun, never sent, no
+  # key) next to its journal; no engine signal.
+  - name: paper-m4-hl-small
+    description: EXPERIMENT M4 reg7n at a 230 USD paper account on Hyperliquid's listed coins, with dry-run orders (never sent)
+    schedule: "0 6 * * *"
+    command: python -m lab.paper.m4_hl_small
+    env: {PYTHIA_CACHE: /data/lab-cache}
+    resources: {cpus: 4, memory: 8g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 2h
+
   # Funding carry on perps (results/funding_carry.md), an experiment (passes its
   # registered gates and the residual after low vol and BTC, fails deflation),
   # on the liquid perps Kraken Futures lists. Its signal is
