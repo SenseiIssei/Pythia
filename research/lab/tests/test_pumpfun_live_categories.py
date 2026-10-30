@@ -442,6 +442,26 @@ def test_the_service_runs_the_classifier_and_shows_it_in_the_status(tmp_path, ca
     assert st["classifier"]["classified"] == 1 and st["classifier"]["every_s"] == LC.EVERY_S
 
 
+def test_a_paused_live_book_asks_no_model_for_categories(tmp_path, cats_folder):
+    svc, col, pipe = service()
+    svc.attach_categories()
+    ai = FakeAi(code="celebrity")
+    svc.cats.poster = ai
+    svc.book.exec.paused_ms = T0                                       # the owner's pause from the app
+    col.handle(note("c", 100, CREATE), T0, PUBLIC)
+    assert MINT in svc.cats.new
+
+    async def go():
+        stop = asyncio.Event()
+        task = asyncio.create_task(LS.classify_loop(svc, stop, every_s=0.05))
+        await asyncio.sleep(0.2)
+        stop.set()
+        await task
+    asyncio.run(go())
+    assert not ai.calls and not svc.cats.st["runs"] and not svc.cats.new
+    assert svc.cats.st["held_off"] == 1 and svc.cats.status()["pending"] == 0
+
+
 # ---------------------------------------------------------------- the evaluation's offline rule
 
 def test_the_offline_rule_uses_a_names_category_and_keeps_coins_without_one():

@@ -132,7 +132,7 @@ class LiveClassifier:
         self.models: set[str] = set()                   # the models that answered (their trial registered)
         self.busy = False
         self.st = {"runs": 0, "coins": 0, "asked": 0, "classified": 0, "reused": 0, "dropped": 0, "errors": 0,
-                   "last_ms": None, "last_error": None}
+                   "held_off": 0, "last_ms": None, "last_error": None}
         self.since_log = {"runs": 0, "coins": 0, "asked": 0, "classified": 0, "cost_usd": 0.0}
         self.log_t = time.monotonic()
         self.err_n = 0
@@ -196,6 +196,14 @@ class LiveClassifier:
         self.trending = self.top()
         self.busy = True
         return batch, self.trending
+
+    def hold_off(self) -> int:
+        """Let the waiting coins go without a run (the live book is paused, so no buy asks for them); how many. The
+        names stay for the trending list."""
+        n = len(self.new) + len(self.retry)
+        self.new, self.retry = {}, {}
+        self.st["held_off"] += n
+        return n
 
     def known(self, key: str) -> tuple[int, str, str] | None:
         """(avail_ms, code, model) of a name a local model classified (the API's rows do not count, AI2)."""

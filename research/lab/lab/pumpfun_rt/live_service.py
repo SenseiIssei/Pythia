@@ -80,7 +80,8 @@ classified (the daily job's prompt, chunks and checks, the engine's metered endp
 cats.jsonl; the live strategy skips a coin of a blocked category (blocklist category: lines, celebrity, copycat and
 scam by default) with "category celebrity" etc., and one that reaches the buy without a category is asked alone at
 once (at most 1.5 s, the loop waits) or skipped "category unknown". The status's "categories" shows the classifier,
-the blocked codes and the day's cost.
+the blocked codes and the day's cost. While the owner's pause holds, nothing buys and so nothing needs a category:
+the classifier asks no model then and lets the waiting coins go (counted as "held_off"; the owner, 2026-10-30).
 """
 
 from __future__ import annotations
@@ -626,6 +627,11 @@ class Service:
         except Exception as e:
             self._feed_failed(e)
 
+    def owner_paused(self) -> bool:
+        """The owner paused the live book from the app (no buys until he resumes it)."""
+        ex = getattr(self.book, "exec", None)
+        return ex is not None and ex.paused_ms is not None
+
     def light_status(self) -> dict:
         ex = self.book.exec
         return {"on": ex.closed_why is None and ex.paused_ms is None, "balance_sol": None if self.balance_l is None else self.balance_l / 1e9,
@@ -1051,6 +1057,9 @@ async def classify_loop(svc: Service, stop: asyncio.Event, every_s: float | None
             break
         except asyncio.TimeoutError:
             pass
+        if svc.cats is not None and svc.owner_paused():
+            svc.cats.hold_off()                             # no buy asks for them: no model is asked either
+            continue
         job = svc.cats.take() if svc.cats is not None else None
         if job is None:
             continue
