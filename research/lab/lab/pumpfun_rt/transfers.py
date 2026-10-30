@@ -12,8 +12,10 @@ connection (the first of the collector's feeds, collector.feed_urls) carries one
 the signature only, so each is sorted by its logs (log_kind):
 
   failed                 skipped (counted)
-  pump                   pump.fun or PumpSwap invoked and no token transfer at the top level: a trade, on record
-                         already (amm), skipped
+  pump                   pump.fun or PumpSwap invoked and no token transfer at the top level: a trade, not fetched;
+                         every notification that did not fail also goes to the collector's handle_tx (on_tx) as
+                         from one more feed, so the coin's trades reach the amm table when the program links had
+                         a gap (a duplicate by signature is dropped there)
   pump+transfer          a trade with a top-level token transfer next to it (a transfer and a sale in one
                          transaction, the dump in one go): fetched
   transfer               a token program logs Transfer, TransferChecked or TransferCheckedWithFee (or the logs are
@@ -262,6 +264,8 @@ class TransferWatch:
         self.next_call = 0.0                                     # monotonic time of the next RPC call allowed
         self.connected = False
         self.down_since: int | None = None                       # lost while coins were watched
+        self.on_tx = None                                        # Collector.handle_tx: see on_message
+        self.src = "xfer"
 
     # ------------------------------------------------------------ the watch
     def watch(self, mint: str, start_ms: int) -> bool:
@@ -361,8 +365,14 @@ class TransferWatch:
             return None
         res = params.get("result") or {}
         v = res.get("value") or {}
-        return self.note(mint, (res.get("context") or {}).get("slot") or 0, v.get("signature") or "",
-                         v.get("err") is not None, v.get("logs") or [], recv_ms)
+        slot, sig, failed, logs = ((res.get("context") or {}).get("slot") or 0, v.get("signature") or "",
+                                   v.get("err") is not None, v.get("logs") or [])
+        if self.on_tx is not None and not failed:
+            # the watched coin's PumpSwap trades come along here anyway: handed to the collector as from one more
+            # feed (a duplicate by signature is dropped there), so a gap of the program links is filled for the
+            # coins of the last half hour (10 of 34 live coins had no pool trade on record, 2026-10-29)
+            self.on_tx(slot, sig, False, logs, recv_ms, self.src)
+        return self.note(mint, slot, sig, failed, logs, recv_ms)
 
     def note(self, mint: str, slot: int, sig: str, failed: bool, logs: list[str], recv_ms: int) -> str:
         """One transaction that mentions a watched mint: queued for its fetch or skipped. Returns what it was."""
@@ -447,6 +457,7 @@ class TransferWatch:
         reconnected with backoff like the program links."""
         import aiohttp
         src = safe_url(url)
+        self.src = "xfer " + src
         backoff = 0.5
         while not stop.is_set():
             self.expire()

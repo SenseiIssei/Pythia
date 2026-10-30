@@ -357,6 +357,28 @@ def test_a_migration_starts_a_watch_and_the_heartbeat_says_so():
     assert col.counts["transfers"] == 1
 
 
+def test_a_watched_coins_pool_trade_from_the_transfer_link_fills_a_gap_once():
+    rows = []
+    col = CL.Collector(None, on_row=lambda tb, r: rows.append((tb, r)), amm=True, meta=False)
+    col.xfer = TR.TransferWatch(col.keep, col.counts, clock=lambda: T0)
+    col.xfer.on_tx = col.handle_tx
+    mig = {"user": DEV, "mint": MINT, "mint_amount": 1, "sol_amount": 1, "pool_migration_fee": 0,
+           "bonding_curve": key(4), "timestamp": 1, "pool": POOL}
+    col.handle(note("m1", 104, logs_for((E.PUMP, "CompletePumpAmmMigrationEvent", mig))), T0)
+    col.xfer.up()
+    col.xfer.on_message(answer(sent(col.xfer)[0]["id"], 77), T0)
+    sale = {"timestamp": 1, "base_amount_in": 10, "quote_amount_out": 5, "pool_base_token_reserves": 1000,
+            "pool_quote_token_reserves": 100, "pool": POOL, "user": A}
+    trade = logs_for((E.PUMP_AMM, "SellEvent", sale))
+    assert col.xfer.on_message(notification(77, "d1", trade), T0 + 5) == "pump"     # not fetched
+    assert col.xfer.on_message(notification(77, "d2", trade, err={"x": 1}), T0 + 5) == "failed"
+    amm = [r for tb, r in rows if tb == "amm"]
+    assert len(amm) == 1 and amm[0]["mint"] == MINT and not amm[0]["buy"]
+    assert col.first_by["xfer"] == 1 and col.counts["failed_tx"] == 0
+    assert col.handle(note("d1", 105, trade), T0 + 9) == 0                          # the program link, later
+    assert col.counts["duplicate"] == 1 and len([1 for tb, _ in rows if tb == "amm"]) == 1
+
+
 def test_the_switch():
     assert TR.enabled({}) and not TR.enabled({"PYTHIA_PF_TRANSFERS": "0"})
     assert TR.rpc_url({"PYTHIA_PF_POOL_RPC": "https://pool"}) == "https://pool"

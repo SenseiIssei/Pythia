@@ -747,6 +747,7 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
         col.tap = Tap()
     if TR.enabled():
         col.xfer = TR.TransferWatch(col.keep, col.counts)
+        col.xfer.on_tx = col.handle_tx                    # its PumpSwap trades fill the program links' gaps
     hb = store.base() / "heartbeat.json"
     if writer is not None:
         last = 0
