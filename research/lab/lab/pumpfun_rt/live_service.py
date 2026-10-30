@@ -71,6 +71,10 @@ each with the same subscriptions, the first copy by signature wins, the budget p
 first subscription (no logsSubscribe with mentions on its plan) is benched for the session, one that errors, refuses
 later or runs out until its reconnect or 00:00 UTC, and the others carry on; latency.md has a row per provider.
 
+Pool record (PoolRecord, the owner, 2026-10-30): every migrated pool's trades of its first PYTHIA_PF_LIVE_RECORD_S
+(600) seconds, as this service took them and from which feed, go to data/live/pumpfun_rt/record/<day>.jsonl.gz for
+the lab, since the collector's public links lose some coins entirely. Paper data: nothing here trades on it.
+
 Name categories (livecat.py, the owner, 2026-10-23): every 30 s the new plain coins the stream saw created are
 classified (the daily job's prompt, chunks and checks, the engine's metered endpoint and budget) into the same
 cats.jsonl; the live strategy skips a coin of a blocked category (blocklist category: lines, celebrity, copycat and
@@ -116,6 +120,10 @@ WATCH_SRC = "watch "                                    # the source label of th
 RACED_KEEP = 20_000
 LEADS_KEEP = 5_000                                      # leads kept per day for the percentiles
 PROVIDER_DAYS = 14
+RECORD_S = float(os.environ.get("PYTHIA_PF_LIVE_RECORD_S", "600"))   # PoolRecord's window after a migration; 0: off
+RECORD_FLUSH_S = 5.0
+RECORD_BUFFER = 50_000                                  # rows waiting for their write (more are dropped, and counted)
+RECORD_DAYS = 30
 
 
 def load_engine():
@@ -180,8 +188,11 @@ class LiveCollector(Collector):
         super().__init__(*a, **kw)
         self.race = None
         self.raced: collections.OrderedDict[str, list] = collections.OrderedDict()   # signatures of watched copies
+        self.record: PoolRecord | None = None
+        self.src = ""                                       # the feed of the transaction being handled
 
     def handle_tx(self, slot: int, sig: str, failed: bool, logs: list[str], recv_ms: int, src: str = "ws") -> int:
+        self.src = src
         had = None if failed else self.sigs.get(sig)       # (log lines, tx number, feed, receive ms) of the copy taken
         if not failed and self.race is not None:
             self._race(sig, had, src, recv_ms)
@@ -248,7 +259,77 @@ class LiveCollector(Collector):
         """As the collector's, and the live copy keeps its message's receive time (`recv_ms`, wall ms) next to
         its slot time: an order this row decides carries both (measure.split, the receive step)."""
         row["recv_ms"] = row.get("t")
+        if self.record is not None:
+            self.record.add(table, row, chain_ms, sig, self.src, self.pools)
         return super().keep(table, row, chain_ms, sig)
+
+
+class PoolRecord:
+    """Every migrated coin's PumpSwap trades for its first RECORD_S seconds, as the live service saw them, in
+    data/live/pumpfun_rt/record/<UTC day>.jsonl.gz (one gzip member per write; gzip reads them as one file). The
+    collector's record missed every pool trade of 10 of the 34 live coins of 2026-10-29, both rugs among them, in
+    the gaps of its public links; the live service has these coins from its own links and, for the coins it
+    watches or holds, from the owner's provider, so this costs no extra data. One line a row: the table, the row
+    as kept (receive ms in t and recv_ms), chain_ms (slot time), sig and src (the feed of the copy taken: the
+    public endpoint or "watch <provider>"); the migration and pool-state rows ("other") of those coins and every
+    gap of the live links too. PAPER DATA ONLY: nothing reads it to trade, and a failure to write it is counted
+    and never stops the service (status "record")."""
+
+    def __init__(self, window_s: float = RECORD_S, root=None, now=time.time):
+        self.window_ms = window_s * 1000
+        self.root = root
+        self.now = now
+        self.buf: list[str] = []
+        self.counts = collections.Counter()
+        self.last = 0.0
+
+    def dir(self):
+        return (self.root if self.root is not None else LX.data_dir() / "record")
+
+    def add(self, table: str, row: dict, chain_ms, sig, src: str, pools: dict) -> None:
+        try:
+            if table == "amm":
+                hit = pools.get(row.get("pool"))
+                if hit is None or row.get("t", 0) - hit[1] > self.window_ms:
+                    return
+            elif table != "other" or row.get("kind") not in ("migrate", "pool_state", "gap"):
+                return
+            if len(self.buf) >= RECORD_BUFFER:
+                self.counts["dropped"] += 1
+                return
+            self.buf.append(json.dumps({"table": table, **row, "chain_ms": chain_ms, "sig": sig, "src": src},
+                                       separators=(",", ":"), default=str))
+            self.counts["rows"] += 1
+        except Exception:                                   # a record never stops a trade
+            self.counts["errors"] += 1
+
+    def due(self) -> bool:
+        return bool(self.buf) and time.monotonic() - self.last >= RECORD_FLUSH_S
+
+    def flush(self) -> int:
+        """Appends the waiting rows to today's file (run off the event loop); old files go after RECORD_DAYS."""
+        import gzip
+        self.last = time.monotonic()
+        lines, self.buf = self.buf, []
+        if not lines:
+            return 0
+        try:
+            d = self.dir()
+            d.mkdir(parents=True, exist_ok=True)
+            day = utc_day(self.now())
+            with gzip.open(d / f"{day}.jsonl.gz", "at", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            self.counts["written"] += len(lines)
+            for old in sorted(d.glob("*.jsonl.gz"))[:-RECORD_DAYS]:
+                old.unlink()
+        except Exception as e:
+            self.counts["errors"] += 1
+            if self.counts["errors"] <= 5:
+                print(f"live service: record not written ({type(e).__name__}: {e})", flush=True)
+        return len(lines)
+
+    def status(self) -> dict:
+        return {"window_s": self.window_ms / 1000, **self.counts}
 
 
 class Service:
@@ -279,6 +360,7 @@ class Service:
         self.errors = 0
         self.tapped = 0                                     # F2: coins adopted from the collector's tap
         self.prov: Providers | None = None                  # the targeted provider streams (only with a provider)
+        self.record: PoolRecord | None = None               # the first minutes of every pool, as seen here
         self.w_since: dict[str, float] = {}                 # mint -> monotonic s since the strategy waits on it
         self.cats = None                                    # livecat.LiveClassifier (with a live book)
         self.cat_gate = None                                # livecat.CategoryGate, the pipeline's category rule
@@ -600,6 +682,8 @@ class Service:
             st = LX.base_status(self.gate, self.why, self.address, self.balance_l, self.balance_t, self.holdings)
         if self.prov is not None:
             st["provider"] = self.prov.status()
+        if self.record is not None:
+            st["record"] = self.record.status()
         if self.cat_gate is not None:
             st["categories"] = dict(self.cat_gate.status(), classifier=self.cats.status() if self.cats else None)
         return st
@@ -1026,6 +1110,10 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
                 print("live service: each migration's pool is read from the chain (F1)", flush=True)
             if tap is not None:
                 print("live service: the collector's new coins are adopted every second (F2)", flush=True)
+            if RECORD_S > 0:
+                svc.record = col.record = PoolRecord()
+                print(f"live service: every pool's first {RECORD_S:g} s go to {col.record.dir()} (paper data)",
+                      flush=True)
             if svc.cats is not None:
                 tasks.append(asyncio.create_task(classify_loop(svc, stop)))
             if provs:
@@ -1046,6 +1134,8 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
                     except Exception as e:                 # the store's adoption at start still holds
                         print(f"live service: tap {type(e).__name__}: {e}", flush=True)
                 svc.tick(col.clock.latest or int(time.time() * 1000))
+                if col.record is not None and col.record.due():
+                    await asyncio.to_thread(col.record.flush)
                 mono = time.monotonic()
                 if t_warm is not None and mono >= t_warm:
                     t_warm = None
@@ -1076,6 +1166,8 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if col.record is not None:
+                col.record.flush()
             svc.stopped()
     return 0
 

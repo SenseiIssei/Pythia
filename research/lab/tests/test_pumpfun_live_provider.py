@@ -468,3 +468,23 @@ def test_a_file_of_one_provider_still_reads(folders):
     LS.ProviderWatch.path().write_text(json.dumps({"providers": {"wss://h.example/v2/abc?k=1#x": {"days": {}}}}),
                                        encoding="utf-8")
     assert LT.provider_summary()[0]["provider"] == "wss://h.example"         # whatever a file holds: the host only
+
+
+def test_the_pool_record_keeps_each_pools_first_minutes_with_their_feed(tmp_path):
+    import gzip
+    col = LS.LiveCollector(None, None, amm=True, meta=False)
+    col.record = LS.PoolRecord(window_s=600, root=tmp_path, now=lambda: DAY + 60)
+    col.handle(note("c1", 100, CREATE), T0)                                   # a creation: not recorded
+    col.handle(note("m1", 101, MIGRATE), T0 + 1_000, PUBLIC)
+    col.handle_tx(102, "b1", False, POOL_BUY, T0 + 2_000, LS.WATCH_SRC + "h.example")
+    col.handle(note("b1", 102, POOL_BUY), T0 + 2_500, PUBLIC)                       # the public copy: a duplicate
+    col.handle(note("b2", 103, POOL_BUY), T0 + 1_000 + 600_001)               # past the window
+    assert col.record.due() and col.record.flush() == 2 and not col.record.buf
+    rows = [json.loads(x) for x in gzip.open(tmp_path / "2026-10-24.jsonl.gz", "rt", encoding="utf-8")]
+    assert [(r["table"], r.get("kind"), r["src"]) for r in rows] == [
+        ("other", "migrate", PUBLIC), ("amm", None, LS.WATCH_SRC + "h.example")]
+    assert rows[1]["mint"] == MINT and rows[1]["sig"] == "b1" and rows[1]["t"] == T0 + 2_000
+    col.handle(note("b3", 104, POOL_BUY), T0 + 3_000)
+    col.record.flush()                                                        # a second gzip member, one file
+    assert len(list(gzip.open(tmp_path / "2026-10-24.jsonl.gz", "rt", encoding="utf-8"))) == 3
+    assert col.record.status() == {"window_s": 600.0, "rows": 3, "written": 3}
