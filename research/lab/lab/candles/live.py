@@ -4,7 +4,7 @@
                                           from the public klines REST endpoint for the lab's coins and PAXG
                                           (the archive lags about a day), then 1m candles from the recorded
                                           Kraken trades, each minute against Binance's (ref_dev_bps)
-    python -m lab.candles.live markets    hourly (job candles-markets): GeckoTerminal 1h and 1d of the
+    python -m lab.candles.live markets    every 10 minutes (job candles-markets): GeckoTerminal 1h and 1d of the
                                           xStocks tokens, PAXG and the on-chain coins' deepest Solana pools
                                           with their liquidity; Yahoo 1d and 1h of the underlyings every
                                           yahoo_every_h hours
@@ -19,8 +19,9 @@ the store when the recorder's retention removes the raw trades.
 GeckoTerminal (polite: one call per gecko_gap_s and, with pumpfun's calls, one per lab.hostpace's gap across
 processes (they share the keyless quota), gecko_calls_per_run calls and gecko_run_s seconds a run; a
 429 waits once, Retry-After or at most gecko_retry_s, the next ends the run's calls to it and backs it off 2
-minutes, doubling to 30, while 429s go on): the pool of a token is the deepest against USDC or SOL, looked up
-every pool_refresh_days; the pools' liquidity in one /pools/multi call a run, put on the newest closed bar;
+minutes, doubling to 30 while runs get nothing through; about 5 calls a run get through since 2026-10, hence
+the runs every 10 minutes): the pool of a token is the deepest against USDC or SOL, looked up
+every pool_refresh_days; the pools' liquidity in one /pools/multi call an hour, put on the newest closed bar;
 then the work, pool timeframes (1h, 1d) without a bar first, then what the last run left (the cursor,
 <write root>/candles/gecko_cursor.json), then the stalest, each asking for the bars since the newest stored,
 and last the 1h history walked back gecko_hour_days (the keyless API's reach). The work a run does not reach
@@ -405,14 +406,18 @@ def run_gecko(get, cfg: dict, state: dict, now: int, root: Path | None = None, t
         due = {f"{tf}/{a}": _last_end("gecko", a, tf, root) for tf in ("1h", "1d") for a in live}
         due = {k: last for k, last in due.items() if not last or now - last >= S.TF[k.split("/")[0]]}
         todo = gecko_work(due, [f"back/{a}" for a in live if not done.get(a)], list(cur.get("left") or []), now)
-        liq = {}
+        lq = gs.get("liquidity") or {}
+        liq = dict(lq.get("by") or {})
         hourly = [k.split("/")[1] for k in todo if k.startswith("1h/")]
-        for i in range(0, len(hourly), 30):                         # the pools' liquidity now, one call per 30
-            chunk = hourly[i:i + 30]
-            ans = get(f"{GECKO}/pools/multi/{','.join(pools[a]['pool'] for a in chunk)}") or {}
-            by = {(x.get("attributes") or {}).get("address"): float((x.get("attributes") or {}).get("reserve_in_usd") or 0)
-                  for x in ans.get("data") or []}
-            liq.update({a: by.get(pools[a]["pool"]) for a in chunk})
+        if hourly and now - int(lq.get("at_us") or 0) >= HOUR:     # every pool's liquidity once an hour, one call
+            liq = {}                                                # per 30 (a run gets about 5 calls before a 429)
+            for i in range(0, len(live), 30):
+                chunk = live[i:i + 30]
+                ans = get(f"{GECKO}/pools/multi/{','.join(pools[a]['pool'] for a in chunk)}") or {}
+                by = {(x.get("attributes") or {}).get("address"): float((x.get("attributes") or {}).get("reserve_in_usd") or 0)
+                      for x in ans.get("data") or []}
+                liq.update({a: by.get(pools[a]["pool"]) for a in chunk})
+            gs["liquidity"] = {"at_us": now, "by": liq}
         while todo:
             if clock() >= deadline:
                 stopped = "the run's time budget"
@@ -439,6 +444,8 @@ def run_gecko(get, cfg: dict, state: dict, now: int, root: Path | None = None, t
         stopped = "HTTP 429" if "HTTP" in str(e) else "the run's call budget"
         if "HTTP" in str(e):                                        # 2 minutes, doubling up to 30 after each 429
             secs = min(BACKOFF_MAX_S, max(BACKOFF_MIN_S, 2 * int(bo.get("secs") or 0)))
+            if fetched:                                             # calls got through first: the quota of the
+                secs = BACKOFF_MIN_S                                # moment, not a block; the next run goes on
             gs["backoff"] = {"secs": secs, "until_us": now + secs * 1_000_000}
     except (OSError, ValueError) as e:
         errors.append(f"gecko: {e}")

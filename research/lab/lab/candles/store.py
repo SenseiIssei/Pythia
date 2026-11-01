@@ -568,7 +568,8 @@ def report(cov: list[dict], dis: list[dict], now: int) -> str:
 def health(now: int | None = None, root: Path | None = None) -> tuple[bool, str]:
     """Red when a live source's newest bar is older than its limit (markets.json stale_min): the Binance
     REST fill and the Kraken candles by their newest, every GeckoTerminal pool (the configured tokens and
-    coins and any in the store) on its own, 1h under stale_min gecko, 1d under gecko_1d (2 days)."""
+    coins and any in the store) on its own, 1h under stale_min gecko, 1d under gecko_1d (2 days); a late pool's
+    line ends with what the last candles-markets run said (pools fetched, left, stopped on HTTP 429)."""
     now = now or now_us()
     cfg = config()
     lim = cfg.get("stale_min", {})
@@ -602,9 +603,24 @@ def health(now: int | None = None, root: Path | None = None) -> tuple[bool, str]
             bad.append(f"gecko {tf}: {len(late)} of {len(pools)} pools over {limit / HOUR:.0f} h ({', '.join(late)})")
         elif pools:
             ok.append(f"gecko {tf} {len(pools)} pools")
+    if any(b.startswith("gecko") for b in bad):                     # why: the collector's last run, in its words
+        run = markets_run(root)
+        if run.get("said"):
+            bad[-1] += (f"; candles-markets {_day(run.get('at_us'))} UTC: {run['said']}"
+                        + (" (GeckoTerminal's keyless API rate limit, outside Pythia)" if "HTTP 429" in run["said"] else ""))
     if bad:
         return False, "Candles stale: " + "; ".join(bad) + (f" (ok: {', '.join(ok)})" if ok else "")
     return True, "Candles ok: " + ", ".join(ok)
+
+
+def markets_run(root: Path | None = None) -> dict:
+    """The last candles-markets run as lab.candles.live wrote it in state.json ({} without one)."""
+    for base in reversed(store_dirs(root)):
+        try:
+            return (json.loads((base / "state.json").read_text()).get("runs") or {}).get("markets") or {}
+        except (OSError, ValueError):
+            continue
+    return {}
 
 
 def main(argv: list[str] | None = None) -> int:

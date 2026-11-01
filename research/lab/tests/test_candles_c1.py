@@ -392,7 +392,8 @@ def test_gecko_429_stops_the_run_saves_the_cursor_and_the_next_run_resumes(tmp_p
     state["gecko"].pop("backoff")
     res = L.run_gecko(g, cfg, state, now + 5 * MIN, root, csv)      # resumes at 1d/SOL, no lookup again
     ohlcv = [u for u in g.urls[n:] if "/ohlcv/" in u]
-    assert "/ohlcv/day" in ohlcv[0] and "/pools/multi/" in g.urls[n] and not any("/tokens/" in u for u in g.urls[n:])
+    assert "/ohlcv/day" in ohlcv[0] and not any("/tokens/" in u for u in g.urls[n:])
+    assert not any("/pools/multi/" in u for u in g.urls[n:])         # the liquidity of 5 minutes ago, kept an hour
     assert res["fetched"][:4] == ["1d/SOL", "1d/SPYx", "1d/QQQx", "1h/SOL"] and res["stopped"] is None
     assert res["left"] == [] and json.loads((root / "candles" / L.CURSOR).read_text())["left"] == []
     assert S.read_manifest(root)["markets"]["gecko/QQQx/1d"]["last_end_us"] == T0
@@ -449,6 +450,54 @@ def test_markets_run_paces_gecko_backs_off_once_on_429_then_stops(tmp_path, monk
     cur = json.loads((root / "candles" / L.CURSOR).read_text())
     assert cur["left"][0] == "1h/SPYx" and len(cur["left"]) == res["gecko_left"] and cur["stopped"] == "HTTP 429"
     assert json.loads((root / "ratelimit" / "api.geckoterminal.com.lock").read_text())["last"] == clock[0]
+
+
+def cron_minutes(field: str) -> list[int]:
+    """The minutes of a cron minute field (N, a,b,c, */n, a-b/n)."""
+    out = []
+    for part in field.split(","):
+        rng, step = (part.split("/") + ["1"])[:2]
+        lo, hi = (0, 59) if rng == "*" else (int(rng.split("-")[0]), int(rng.split("-")[-1]) if "-" in rng else None)
+        out += list(range(lo, 60 if hi is None and "/" in part else (hi if hi is not None else lo) + 1, int(step)))
+    return sorted(set(out))
+
+
+def test_17_pools_stay_under_3_hours_when_geckoterminal_lets_5_calls_a_run_through(tmp_path, monkeypatch):
+    """2026-10-29 to 11-01, candles-health red 444 times in a row: GeckoTerminal answered 429 after 5 calls every
+    run (the liquidity and 4 pools), the job ran hourly, so each of the 17 pools came round every 4 to 5 hours, past
+    the 3 hour limit. Replayed with the job table's schedule: half a day of runs, the last 6 hours every health
+    check has every pool's 1h and 1d in time."""
+    from lab.ops import jobs
+    j = jobs.load_table(Path(__file__).resolve().parents[2] / "ops" / "jobs.yaml").jobs["candles-markets"]
+    minute, hour = j["schedule"].split()[:2]
+    assert hour == "*" and j["command"] == "python -m lab.candles.live markets"
+    names = ["SPYx", "QQQx", "GLDx", "NVDAx", "PAXG", "SOL", "BTC", "ETH", "JUP", "BONK", "WIF", "POPCAT", "RAY",
+             "PYTH", "JTO", "RENDER", "TRUMP"]
+    csv = tmp_path / "tokens.csv"
+    csv.write_text("symbol,mint,kind\n" + "".join(f"{a},MINT_{a.upper()},x\n" for a in names))
+    cfg = {**CFG, "tokens": names, "coins": []}
+    monkeypatch.setattr(S, "config", lambda: cfg)
+    root, start = tmp_path / "d", T0 + 18 * HOUR
+    state = {"gecko": {"pools": {a: {"pool": "POOL_DEEP", "side": "quote", "liquidity_usd": 1.0, "at_us": start}
+                                 for a in names}, "backfilled": {a: True for a in names}}}
+    seed = FakeGecko(start, T0 - 10 * DAY)
+    for a in names:                                                    # every pool in time when the replay starts
+        for tf in ("1h", "1d"):
+            S.write("gecko", a, tf, L.gecko_rows(seed(L._ohlcv_url(state["gecko"]["pools"][a], tf, 48)), tf, start),
+                    start, root)
+    runs = [start + h * HOUR + m * MIN for h in range(12) for m in cron_minutes(minute)]
+    checks, said = 0, []
+    for t in range(start, start + 12 * HOUR, 10 * MIN):
+        for r in [r for r in runs if t - 10 * MIN < r <= t]:
+            g = FakeGecko(r, T0 - 10 * DAY)
+            g.limit_after = 5                                          # the 6th call of a run: 429
+            res = L.run_gecko(g, cfg, state, r, root, csv)
+            said.append(L.gecko_said(res))
+        if t >= start + 6 * HOUR:
+            ok, msg = S.health(t, root)
+            assert "gecko 1h:" not in msg and "gecko 1d:" not in msg, (msg, said[-6:])
+            checks += 1
+    assert checks == 36 and any("stopped on HTTP 429" in s for s in said)
 
 
 # ---------------------------------------------------------------- Yahoo
@@ -599,6 +648,28 @@ def test_health_is_red_per_pool_not_on_the_newest_one(tmp_path, monkeypatch):
     ok, msg = S.health(now, root)
     assert not ok and "gecko 1h: 2 of 4 pools over 3 h (SPYx 4 h, QQQx none)" in msg
     assert "gecko 1d: 3 of 4 pools over 48 h (SPYx 72 h, QQQx none, JUP none)" in msg and "SOL" not in msg
+
+
+def test_health_names_geckoterminals_429_when_pools_are_late(tmp_path, monkeypatch):
+    root, now = tmp_path / "d", T0 + DAY
+    monkeypatch.setattr(S, "config", lambda: CFG)
+    bar = lambda t, p: pl.DataFrame({"open_time_us": [t], "close_time_us": [t + p], "open": [1.0], "high": [1.0],
+                                     "low": [1.0], "close": [1.0]})
+    for src in ("binance_rest", "kraken"):
+        S.write(src, "BTC", "1m", bar(now - 2 * MIN, MIN), now, root)
+    for a in ("SPYx", "SOL"):
+        S.write("gecko", a, "1h", bar(now - (HOUR if a == "SOL" else 5 * HOUR), HOUR), now, root)
+        S.write("gecko", a, "1d", bar(now - DAY, DAY), now, root)
+    said = ("gecko: 1 pools fetched (1 pool timeframes or history steps, 4 bars), 1 pools left (1 items: 1h/SPYx), "
+            "stopped on HTTP 429, cursor saved; yahoo: 0 bars")
+    (root / "candles" / "state.json").write_text(json.dumps({"runs": {"markets": {"at_us": now - 53 * MIN, "said": said}}}))
+    ok, msg = S.health(now, root)
+    assert not ok and msg.startswith("Candles stale: gecko 1h: 1 of 2 pools over 3 h (SPYx 4 h); candles-markets "
+                                     "2026-10-26 23:07 UTC: gecko: 1 pools fetched")
+    assert "stopped on HTTP 429, cursor saved; yahoo: 0 bars (GeckoTerminal's keyless API rate limit, outside Pythia)" in msg
+    S.write("gecko", "SPYx", "1h", bar(now - HOUR, HOUR), now, root)
+    ok, msg = S.health(now, root)                                    # all in time: the run is not named
+    assert ok and "candles-markets" not in msg and chr(0x2014) not in msg
 
 
 def test_gaps_and_the_report(lake):

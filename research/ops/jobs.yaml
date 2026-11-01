@@ -1017,7 +1017,9 @@ jobs:
 
   - name: candles-markets
     description: candles, GeckoTerminal 1h and 1d of the xStocks tokens, PAXG and the on-chain coins' Solana pools with liquidity (empty pools first, then where the last run stopped, then the stalest; 5 minutes and 40 calls a run, a 429 waits once then stops and keeps the rest for the next run), Yahoo of their underlyings, read only
-    schedule: "7 * * * *"
+    # every 10 minutes, not hourly (2026-11-01): GeckoTerminal answers 429 after about 5 calls a run, so an hourly
+    # run reached 4 of the 17 pools and candles-health was red 444 times in a row (each pool 4 to 5 h old)
+    schedule: "7,17,27,37,47,57 * * * *"
     command: python -m lab.candles.live markets
     resources: {cpus: 1, memory: 512m}
     timeout: 8m

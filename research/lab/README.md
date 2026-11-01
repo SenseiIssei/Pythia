@@ -790,16 +790,20 @@ closed by `as_of` (default now); a bar still forming is never complete.
   PAXG and the on-chain coins' deepest USDC or SOL pool on GeckoTerminal's
   free API, 1h and 1d in USD with the pool's liquidity; Yahoo 1d (from 2000)
   and 1h (two years) of the underlyings SPY, QQQ, GLD, NVDA. Job
-  `candles-markets` (hourly; one call per 6 s, and with job `pumpfun`'s
+  `candles-markets` (every 10 minutes since 2026-11-01, hourly before: GeckoTerminal answers 429 after
+  about 5 calls a run, so 4 of the 17 pools a run left each 4 to 5 hours old and `candles-health` red; one
+  call per 6 s, and with job `pumpfun`'s
   calls, which share the keyless quota, one per 7.5 s across processes
   (`lab.hostpace`, a file lock under `<write root>/ratelimit/`; since
   2026-10-29, when the two together got 429 after 4 calls an hour), at
   most 40 calls and 5 minutes a run; pools without a bar first, then where the last run stopped
   (`gecko_cursor.json`), then the stalest, the 1h history walked back half a
   year last; a 429 waits once, the next ends the run, keeps the rest for the
-  next one and backs it off from 2 up to 30 minutes). `candles-health` is
+  next one and backs it off from 2 up to 30 minutes while runs get nothing through; the pools' liquidity
+  once an hour). `candles-health` is
   red per pool: each one whose 1h bar is over 3 hours or 1d bar over 2 days
-  old, or that has none, is named. Markets and limits: `lab/candles/markets.json`.
+  old, or that has none, is named, followed by what the last `candles-markets` run said (a 429 named as
+  GeckoTerminal's rate limit). Markets and limits: `lab/candles/markets.json`.
 - **Storage** under `<data>/candles/source=<s>/asset=<a>/tf=<tf>/`: a
   month's parts, merged into `<YYYY-MM>.parquet` by job `candles-compact`
   (01:40 UTC, finished months final), `manifest.json` (per market and
