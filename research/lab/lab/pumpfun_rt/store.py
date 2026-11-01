@@ -210,8 +210,10 @@ def days(root: Path | None = None) -> list[str]:
     return sorted(d.name[5:] for d in t.iterdir() if d.is_dir() and d.name.startswith("date="))
 
 
-def read(table: str, day_list: list[str], root: Path | None = None):
-    """The rows of `table` for the given days as one polars frame (empty with the schema if none)."""
+def read(table: str, day_list: list[str], root: Path | None = None, cols: list[str] | None = None):
+    """The rows of `table` for the given days as one polars frame (empty with the schema if none). cols: only these
+    columns are read (those a file lacks come as nulls): a fortnight of trades with all its columns is about 7 GB,
+    the study's 8 GB died on it (2026-10-31)."""
     import polars as pl
     root = root or base()
     files = []
@@ -220,8 +222,16 @@ def read(table: str, day_list: list[str], root: Path | None = None):
         if d.is_dir():
             files += sorted(str(f) for f in d.glob("*.parquet"))
     if not files:
-        return pl.from_arrow(SCHEMAS[table].empty_table())
-    return pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
+        empty = pl.from_arrow(SCHEMAS[table].empty_table())
+        return empty if cols is None else empty.select(cols)
+    if cols is None:
+        return pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
+    full = pl.from_arrow(SCHEMAS[table].empty_table()).select(cols)
+    frames = []
+    for f in files:
+        have = set(pl.read_parquet_schema(f))
+        frames.append(pl.read_parquet(f, columns=[c for c in cols if c in have]))
+    return pl.concat([full] + frames, how="diagonal_relaxed").select(cols)
 
 
 def slot_times(pairs) -> dict[int, int]:

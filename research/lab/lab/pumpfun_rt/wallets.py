@@ -152,7 +152,7 @@ def warm(days: list[str], root=None, book: WalletBook | None = None) -> WalletBo
     if cr.height == 0:
         return book
     cr = cr.select("mint", pl.col("t").alias("t0"), "creator", pl.col("user").alias("payer"))
-    tr = store.read("trades", days, root).select("t", "mint", "user", "buy")
+    tr = store.read("trades", days, root, cols=["t", "mint", "user", "buy"])
     done = store.read("other", days, root)
     done = set(done.filter(pl.col("kind") == "complete")["mint"].to_list()) if done.height else set()
     x = tr.join(cr, on="mint").filter((pl.col("t") - pl.col("t0") <= EARLY_S * 1000)

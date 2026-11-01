@@ -145,7 +145,7 @@ def warm_snipers(days: list[str], root=None, book: SniperBook | None = None) -> 
     if cr.height == 0:
         return book
     cr = cr.select("mint", pl.col("t").alias("t0"), "creator", pl.col("user").alias("payer"))
-    tr = store.read("trades", days, root).filter(pl.col("buy")).select("t", "mint", "user")
+    tr = store.read("trades", days, root, cols=["t", "mint", "user", "buy"]).filter(pl.col("buy")).drop("buy")
     x = (tr.join(cr, on="mint").filter((pl.col("t") - pl.col("t0") <= SNIPE_MS) & (pl.col("user") != pl.col("creator"))
                                        & (pl.col("user") != pl.col("payer").fill_null("")))
          .group_by(["mint", "user"]).agg(pl.col("t").min()).sort("t"))

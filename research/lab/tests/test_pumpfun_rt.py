@@ -204,6 +204,44 @@ def test_store_writes_reads_compacts_and_prunes(tmp_path):
     assert gone == [days[0]] and store.days(tmp_path) == [days[1]]
 
 
+def test_the_study_reads_only_the_trade_columns_it_needs(tmp_path, monkeypatch):
+    """The study died on its 8 GB (exit 137, 2026-10-31 and 2026-11-01): span_of read 12 days of trades with all 17
+    columns (about 7 GB on the server, kept by the allocator while both replays ran). The span, the record's counts
+    and the warm-ups now read the columns they use; a file without one of them gives nulls."""
+    import polars as pl
+    from lab.pumpfun_rt import early as EA
+    from lab.pumpfun_rt import study
+    from lab.pumpfun_rt import wallets as W
+    w = store.Writer(tmp_path, budget_gb=1)
+    for d in range(2):
+        t = T0 + d * 86_400_000
+        w.add("creates", {"t": t, "slot": 1, "tx": 0, "mint": key(40 + d), "creator": DEV, "user": DEV})
+        for i in range(3):
+            w.add("trades", {"t": t + 100 + i, "slot": 2, "tx": i, "mint": key(40 + d), "buy": i < 2, "sol": 1,
+                             "tok": 2, "user": BUYERS[i], "sig": "s" * 88, "ix": "buy"})
+        w.flush(t + 200)
+    days = store.days(tmp_path)
+    read, asked = pl.read_parquet, []
+
+    def spy(source, *a, **kw):
+        if "trades" in str(source):
+            asked.append(kw.get("columns"))
+        return read(source, *a, **kw)
+    monkeypatch.setattr(pl, "read_parquet", spy)
+    assert study.span_of(days, tmp_path) == (T0 + 100, T0 + 86_400_000 + 102)
+    assert [r["trades"] for r in study.record_stats(days, tmp_path).values()] == [3, 3]
+    study.warm_book(days, tmp_path)
+    W.warm(days, tmp_path)
+    EA.warm_snipers(days, tmp_path)
+    assert asked and all(c is not None and set(c) <= {"t", "mint", "user", "buy", "tok"} for c in asked)
+    df = store.read("trades", days, tmp_path, cols=["t", "buy"])
+    assert df.columns == ["t", "buy"] and df.height == 6 and df["buy"].sum() == 4
+    pl.DataFrame({"t": [T0 + 300]}).write_parquet(tmp_path / "trades" / f"date={days[0]}" / "zz-old.parquet")
+    df = store.read("trades", days[:1], tmp_path, cols=["t", "buy"])
+    assert df.height == 4 and df["buy"].null_count() == 1
+    assert store.read("trades", ["2000-01-01"], tmp_path, cols=["t"]).columns == ["t"]
+
+
 # ---------------------------------------------------------------- curve
 
 def test_curve_round_trip_costs_two_fees_and_the_impact():

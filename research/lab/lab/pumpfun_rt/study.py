@@ -114,7 +114,7 @@ def warm_book(days: list[str], root=None) -> CreatorBook:
         return book
     cr = store.read("creates", days, root).select("t", "mint", "creator", pl.col("user").alias("payer")).sort("t")
     ot = store.read("other", days, root).filter(pl.col("kind") == "complete").select("t", "mint")
-    tr = store.read("trades", days, root).select("t", "mint", "user", "buy", "tok")
+    tr = store.read("trades", days, root, cols=["t", "mint", "user", "buy", "tok"])
     dev = tr.join(cr.select("mint", "creator", "payer"), on="mint").filter(
         (pl.col("user") == pl.col("creator")) | (pl.col("user") == pl.col("payer")))
     agg = dev.group_by("mint").agg((pl.col("tok") * pl.col("buy")).sum().alias("bought"),
@@ -549,7 +549,7 @@ def readiness(results: list[dict], n_days: int, shadow: dict[str, dict]) -> dict
 
 def span_of(days: list[str], root=None) -> tuple[int, int]:
     import polars as pl
-    tr = store.read("trades", days, root).select(pl.col("t").min().alias("a"), pl.col("t").max().alias("b"))
+    tr = store.read("trades", days, root, cols=["t"]).select(pl.col("t").min().alias("a"), pl.col("t").max().alias("b"))
     return int(tr["a"][0] or 0), int(tr["b"][0] or 0)
 
 
@@ -561,7 +561,7 @@ def record_stats(days: list[str], root=None) -> dict:
     for d in days:
         cr = store.read("creates", [d], root)
         ot = store.read("other", [d], root)
-        n_tr = store.read("trades", [d], root).height
+        n_tr = store.read("trades", [d], root, cols=["t"]).height
         plain = cr.filter(pl.col("quote").is_null() & ~pl.col("mayhem").fill_null(False)).height if cr.height else 0
         gaps = ot.filter(pl.col("kind") == "gap") if ot.height else ot
         out[d] = {"tokens": cr.height, "plain": plain, "trades": n_tr,
