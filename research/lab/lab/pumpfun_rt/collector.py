@@ -85,7 +85,8 @@ messages without any link going down (no gap row). Every created or completed co
 COMPLETE_WAIT_MS later, adopts the pool as if its migration had come (pool read with the mint's supply, the trades
 that waited kept, counts migrate_missed_amm and migrate_missed_complete). A completion or migration of a coin whose
 creation is not on record has its creation read from the chain (poolread.creation: the bonding curve's oldest
-transaction, at most CREATE_CALL_S apart) and stored with `late` set, never tapped or handed to the shadow book.
+transaction, at most CREATE_CALL_S apart) and stored in the table creates_late, never in creates (the live
+service warms from it), never tapped or handed to the shadow book.
 PumpSwap rows keep the event's base_supply and can_boost. coverage.py reports how complete each day is.
 
 Token transfers (2026-10-29, transfers.py, PYTHIA_PF_TRANSFERS=0 turns it off): every migrated coin's mint is
@@ -503,7 +504,7 @@ class Collector:
                 continue
             self.counts["create_read"] += 1
             if self.writer is not None:
-                self.writer.add("creates", row)
+                self.writer.add("creates_late", row)
 
     # ------------------------------------------------------------ C1: migrations the stream lost
     def expect_pool(self, mint: str, ms: int) -> None:
@@ -883,9 +884,10 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     col.backfill = writer is not None                     # C1: never in the live service's collector
     if col.backfill:                                      # the creations of the last two days are on record
         try:
-            for m in store.read("creates", [store.day_of(now_ms() - 86_400_000), store.day_of(now_ms())],
-                                cols=["mint"])["mint"].drop_nulls().to_list():
-                col.seen_create(m)
+            two = sorted({store.day_of(now_ms() - 86_400_000), store.day_of(now_ms())})
+            for table in ("creates", "creates_late"):
+                for m in store.read(table, two, cols=["mint"])["mint"].drop_nulls().to_list():
+                    col.seen_create(m)
         except Exception as e:                            # an unreadable part: those coins may be read once more
             print(f"collector: creations on record not read ({type(e).__name__})", flush=True)
     if TR.enabled():

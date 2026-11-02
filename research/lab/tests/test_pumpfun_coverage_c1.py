@@ -153,8 +153,8 @@ def test_the_coverage_report_counts_the_record(tmp_path):
         {"mint": key(70), "rule": "P_pool0", "signal_ms": T0 - 3 * 86_400_000}]}))
     res = CV.build([DAY], tmp_path, live)
     r = res["days"][DAY]
-    assert r["migrated"] == {"coins": 3, "pool_state": 2, "creation": 2, "both": 1, "pool_state_share": 0.6667,
-                             "creation_share": 0.6667, "both_share": 0.3333}
+    assert r["migrated"] == {"coins": 3, "pool_state": 2, "creation": 2, "both": 1, "creation_late": 0,
+                             "pool_state_share": 0.6667, "creation_share": 0.6667, "both_share": 0.3333}
     assert r["live"] == {"mints": 3, "covered": 1, "no_creation": 1, "no_pool_state": 1, "share": 0.3333,
                          "missing": sorted([B, C])}
     g = r["gaps"]
@@ -167,6 +167,9 @@ def test_the_coverage_report_counts_the_record(tmp_path):
     # merged with an older report, at most KEEP_DAYS kept
     again = CV.build([DAY], tmp_path, live, old={"days": {"2026-01-01": r}})
     assert list(again["days"]) == ["2026-01-01", DAY]
+    store.Writer(tmp_path).write({"creates_late": [{"t": T0, "mint": C, "late": T0 + 60_000}]})
+    r = CV.build([DAY], tmp_path, live)["days"][DAY]
+    assert r["migrated"]["both"] == 2 and r["migrated"]["creation_late"] == 1 and r["live"]["covered"] == 2
 
 
 def test_old_parts_without_a_block_time_or_the_new_columns_still_count(tmp_path):
@@ -214,7 +217,7 @@ def test_the_creation_is_read_from_the_curves_oldest_transaction(monkeypatch):
     call, calls = sig_rpc([["s9", "s8", "s7"], ["s6", "s5"]], logs)
     row = PR.creation(B, key(4), call=call, clock=lambda: T0 + 99)
     assert row["mint"] == B and row["sig"] == "s5" and row["t"] == 1_792_449_990_000 and row["late"] == T0 + 99
-    assert row["slot"] == 900 and row["tx"] is None and set(row) <= {f.name for f in store.SCHEMAS["creates"]}
+    assert row["slot"] == 900 and row["tx"] is None and set(row) <= {f.name for f in store.SCHEMAS["creates_late"]}
     assert calls[1][1][1]["before"] == "s7" and calls[2] == ("getTransaction", calls[2][1])
     assert PR.creation(A, key(4), call=sig_rpc([["s1"]], logs)[0]) is None, "another coin's creation is not taken"
     assert PR.first_signature(sig_rpc([["a", "b", "c"]] * 20, [])[0], key(4), pages=2) is None, "too many: given up"
@@ -250,8 +253,9 @@ def test_a_lost_creation_is_read_once_stored_and_never_tapped(tmp_path):
     asyncio.run(go())
     assert reads == [(B, key(5))], "A's creation is on record; B's is read once, not again at its migration"
     w.flush(T0)
-    cr = store.read("creates", [DAY], tmp_path).sort("t")
-    assert cr["mint"].to_list() == [B, A] and cr["late"].to_list() == [T0 + 5, None]
+    assert store.read("creates", [DAY], tmp_path)["mint"].to_list() == [A], "the live service warms from creates"
+    late = store.read("creates_late", [DAY], tmp_path)
+    assert late["mint"].to_list() == [B] and late["late"].to_list() == [T0 + 5]
     assert [r["mint"] for r in tapped] == [A] and rows.count("creates") == 1
     assert col.counts["create_missed"] == 1
 

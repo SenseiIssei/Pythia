@@ -9,7 +9,8 @@ in the record, 20 no creation row, 11 a stream gap, and the record lagged the li
 now recovers a migration the stream lost (collector.py, C1); this says per day whether that is enough:
 
   migrated   coins with a migration, a completed curve or a pool read that day; the share of them with a pool read
-             (pool_state), with a creation row (that day or the CREATE_DAYS - 1 before) and with both
+             (pool_state), with a creation row (that day or the CREATE_DAYS - 1 before; one read late from the chain,
+             creates_late, counts and is also counted apart) and with both
   live       the mints the live bot traded that day (reports/pumpfun_rt/live_trades.json, read only); covered when
              the record has the creation row and, for a pool rule, a pool read: what a paper twin needs
   gaps       every stretch with all links of a program down ("gap" rows): its program, start, end and length
@@ -69,6 +70,8 @@ def day_coverage(day: str, live: list[dict], root=None) -> dict:
     d0 = date.fromisoformat(day)
     back = [(d0 - timedelta(days=k)).isoformat() for k in range(CREATE_DAYS - 1, -1, -1)]
     created = set(store.read("creates", back, root, cols=["mint"])["mint"].drop_nulls().to_list())
+    late = set(store.read("creates_late", back, root, cols=["mint"])["mint"].drop_nulls().to_list())
+    created |= late
     other = store.read("other", [day], root, cols=["kind", "t", "mint", "user", "t0", "bts"])
     kind = pl.col("kind")
     migrated = set(other.filter(kind.is_in(["migrate", "complete", "pool_state"]))["mint"].drop_nulls().to_list())
@@ -78,7 +81,7 @@ def day_coverage(day: str, live: list[dict], root=None) -> dict:
     def share(k):
         return round(k / n, 4) if n else None
     mig = {"coins": n, "pool_state": len(migrated & pooled), "creation": len(migrated & created),
-           "both": len(migrated & pooled & created)}
+           "both": len(migrated & pooled & created), "creation_late": len(migrated & late)}
     mig.update({f"{k}_share": share(mig[k]) for k in ("pool_state", "creation", "both")})
 
     mints = []

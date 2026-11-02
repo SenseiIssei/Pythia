@@ -135,7 +135,7 @@ def first_signature(call, address: str, pages: int = SIG_PAGES) -> str | None:
 
 
 def creation(mint: str, curve: str, call=None, clock=None) -> dict | None:
-    """C1: the creates row of a coin whose creation the stream lost, from the oldest transaction of its bonding
+    """C1: the creates_late row of a coin whose creation the stream lost, from the oldest transaction of its bonding
     curve: its CreateEvent as the collector keeps it, t the block time (ms), "late" the time it was read (ms).
     None when that transaction holds no creation of this mint."""
     from . import events as E
