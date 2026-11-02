@@ -356,6 +356,22 @@ def test_the_feed_remembers_first_then_posts_what_is_new(bot):
     assert got == [], "nothing twice; the two headlines beyond five were remembered, not held back"
 
 
+def test_a_study_rewritten_with_the_same_verdict_is_not_posted_again(data):
+    root = notify.data_root()
+    got = []
+    poster = lambda kind, card: got.append(card) or True                              # noqa: E731
+    write(root, "notify/discord_feed.json", {"studies": {}, "study_said": {}, "forward_ms": 0, "models": [],
+                                             "news": []})
+    p = root / "reports" / "ladder" / "latest.json"
+    for i, (verdict, status) in enumerate([("62 candidates", "watch"), ("62 candidates", "watch"),
+                                           ("63 candidates", "watch"), ("63 candidates", "ok")]):
+        write(root, "reports/ladder/latest.json", {"headline": verdict, "status": status, "updated_ms": i})
+        os.utime(p, (time.time() + 60 * (i + 1), time.time() + 60 * (i + 1)))
+        discord_feed.run(["studies"], now=NOW + i, poster=poster)
+    assert [c.summary for c in got] == ["62 candidates", "63 candidates", "63 candidates"], \
+        "the second write said the same: nothing; a new verdict or status: posted"
+
+
 def test_the_feed_through_the_bot_and_its_switches(bot):
     root = notify.data_root()
     write(root, "notify/discord_feed.json", {"studies": {}, "forward_ms": 0, "models": [], "news": []})

@@ -154,13 +154,19 @@ def markdown(res: dict) -> str:
 def feed(res: dict) -> dict:
     g = res["models"].get("q_gbm", {})
     best = max(res["sims"], key=lambda s: s["sharpe"]) if res["sims"] else {}
-    head = (f"Our model {'beats' if g.get('passes') else 'does not beat'} the market price out of sample "
-            f"(Brier {g.get('brier_model', 0):.4f} vs {g.get('brier_market', 0):.4f}); the best paper rule "
-            f"made {best.get('total_return', 0):+.1%} on the test years.")
-    items = [{"label": f"Model {k[2:]}", "value": f"{m['skill'] * 100:+.2f} %", "status": "ok" if m["passes"] else "bad",
-              "detail": f"Brier skill against the market on {m['markets']:,} markets, out of sample"}
+    # The skill sits where nobody trades and the twin fills at midpoints nobody quoted (the answer in
+    # results/polymarket.md), so the card never reads green: only the forward books on real order books can.
+    liquid = next((r for r in res.get("by_volume") or [] if r["from"] >= 100_000), None)
+    where = (f", but not where people trade (from ${liquid['from']:,.0f} of volume its skill is "
+             f"{liquid['q_gbm']['skill']:+.1%})" if liquid else "")
+    head = (f"Paper only. Our model {'beats' if g.get('passes') else 'does not beat'} the recorded price out of "
+            f"sample (Brier {g.get('brier_model', 0):.4f} vs {g.get('brier_market', 0):.4f}){where}. The paper twin's "
+            f"{best.get('total_return', 0):+.0%} buys at midpoints nobody quoted and is no evidence; the forward books "
+            f"on real order books decide.")
+    items = [{"label": f"Model {k[2:]}", "value": f"{m['skill'] * 100:+.2f} %", "status": "watch",
+              "detail": f"Brier skill against the recorded price on {m['markets']:,} markets, out of sample"}
              for k, m in res["models"].items()]
-    return report.feed_header("Polymarket study", "ok" if g.get("passes") else "watch", head, items)
+    return report.feed_header("Polymarket study", "watch", head, items)
 
 
 def write(res: dict) -> None:

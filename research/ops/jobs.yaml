@@ -481,10 +481,21 @@ jobs:
   # What only the Discord bot carries (lab.ops.discord_feed): the forward report to
   # #paper-buecher, new study verdicts to #studien, model decisions to #modelle, new
   # headlines to #news. Reads files only; does nothing without PYTHIA_DISCORD_BOT_TOKEN.
+  # The studies go three times a day in a job of their own, and only a changed verdict
+  # (the owner, 2026-11-02: not every 10 minutes).
   - name: discord-feed
-    description: forward report, study verdicts, model decisions and news to the Discord bot's channels
+    description: forward report, model decisions and news to the Discord bot's channels
     schedule: "*/10 * * * *"
-    command: python -m lab.ops.discord_feed
+    command: python -m lab.ops.discord_feed forward models news
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
+    alert: false
+
+  - name: discord-feed-studies
+    description: changed study verdicts to the Discord bot's studies channel, three times a day
+    schedule: "0 7,13,19 * * *"
+    command: python -m lab.ops.discord_feed studies
     env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 1, memory: 512m}
     timeout: 5m

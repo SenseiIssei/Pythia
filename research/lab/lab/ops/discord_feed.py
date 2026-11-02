@@ -8,12 +8,15 @@ jobs already write:
   forward   reports/forward/latest.json, once per new report: the headline and the paper
             books (status, days, return) to #paper-buecher
   studies   every study report (reports/<study>/latest.json, the same set the briefing
-            calls studies) that is new or rewritten: its verdict to #studien
+            calls studies) whose verdict is new or changed: its verdict to #studien; a report
+            rewritten with the same verdict says nothing (own job, three times a day)
   models    the model zoo's new decisions (promoted, rejected, kept; reports/models) to #modelle
   news      the news collector's new headlines (<data>/ai/news/<day>.jsonl), those naming a
             coin first, at most five a run, each a link, to #news
 
-  python -m lab.ops.discord_feed               all four (every 10 minutes)
+  python -m lab.ops.discord_feed               all four
+  python -m lab.ops.discord_feed forward models news   every 10 minutes (job discord-feed)
+  python -m lab.ops.discord_feed studies       07:00, 13:00 and 19:00 UTC (job discord-feed-studies)
   python -m lab.ops.discord_feed news forward  only those
   python -m lab.ops.discord_feed --dry-run     print the cards, post nothing, remember nothing
 
@@ -137,6 +140,8 @@ def studies_part(st: dict, lang: str, post, root: Path | None = None) -> None:
     root = root or notify.reports_root()
     first = "studies" not in st
     seen = st.setdefault("studies", {})
+    first = first or "study_said" not in st                 # what they say now is only remembered
+    said = st.setdefault("study_said", {})
     sent = 0
     try:
         dirs = sorted(root.iterdir())
@@ -149,16 +154,28 @@ def studies_part(st: dict, lang: str, post, root: Path | None = None) -> None:
         at = _mtime_ms(p)
         if at is None or at <= int(seen.get(d.name) or 0):
             continue
-        if not first:
+        rep = notify.read_json(p)
+        sig = verdict_sig(rep) if isinstance(rep, dict) else None
+        if not first and sig is not None and sig != said.get(d.name):
             if sent >= STUDIES_PER_RUN:
                 break                                        # the rest on the next run
-            rep = notify.read_json(p)
-            card = one(lambda lg: study_card(d.name, rep, lg), lang) if isinstance(rep, dict) else None
+            card = one(lambda lg: study_card(d.name, rep, lg), lang)
             if card is not None:
                 if not post("studies", card):
                     continue
                 sent += 1
         seen[d.name] = at
+        if sig is not None:
+            said[d.name] = sig
+
+
+def verdict_sig(rep: dict) -> str | None:
+    """What a study says, without its numbers' noise: a report rewritten every few minutes with the same verdict is
+    not news (the ladder, the live lab). Title, status, pass and the verdict text; None when it has no verdict."""
+    verdict = rep.get("verdict") or rep.get("headline")
+    if not isinstance(verdict, str) or not verdict.strip():
+        return None
+    return json.dumps([rep.get("title"), str(rep.get("status") or ""), rep.get("passes"), verdict.strip()])
 
 
 def models_part(st: dict, lang: str, post) -> None:
