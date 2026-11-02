@@ -10,7 +10,9 @@ resolution.
 
 Size. Quarter Kelly, 0.25 * (q - a) / (1 - a) of equity (YES; NO alike with
 1 - q and b), at most 2 % of equity per market, 10 % per event, 25 % per
-category, 60 % invested, at least 5 shares. The fill walks the ask side of
+category, 60 % invested, at least 5 shares and $1 (the CLOB's minimums). The 100 EUR books
+(116 USD, the owner's real stake) allow 5 % a market, else five shares above 46 cents never
+fit. The fill walks the ask side of
 the book level by level while the edge at that level still clears the
 margin, and takes no more than the depth shows.
 
@@ -29,9 +31,12 @@ from . import store
 KELLY = 0.25
 CAP_MARKET, CAP_EVENT, CAP_CATEGORY, CAP_INVESTED = 0.02, 0.10, 0.25, 0.60
 MIN_SHARES = 5.0
+MIN_USD = 1.0        # the CLOB refuses a marketable order under $1 (the 100 EUR books hit it, the $10,000 ones never)
 MIN_ASK, MAX_ASK = 0.03, 0.97
 MAX_DAYS = 90
 START_USD = 10_000.0
+SMALL_USD = 116.0    # 100 EUR (the owner, 2026-11-02): the same rules at the stake he would really put in
+SMALL_CAP_MARKET = 0.05   # 2 % of 116 USD is 2.32 USD, under five shares above 46 cents: 5 % (5.80 USD) a market
 DAY_MS = 86_400_000
 
 
@@ -106,6 +111,8 @@ class Book:
     positions: dict[str, Position] = field(default_factory=dict)
     closed: list[dict] = field(default_factory=list)
     traded: set = field(default_factory=set)
+    start: float = START_USD
+    cap_market: float = CAP_MARKET
 
     # ------------------------------------------------------------ state
     def equity(self) -> float:
@@ -120,7 +127,7 @@ class Book:
 
     def room(self, event_id: str, category: str) -> float:
         eq = self.equity()
-        return max(0.0, min(CAP_MARKET * eq, CAP_EVENT * eq - self.by("event_id", event_id),
+        return max(0.0, min(self.cap_market * eq, CAP_EVENT * eq - self.by("event_id", event_id),
                             CAP_CATEGORY * eq - self.by("category", category),
                             CAP_INVESTED * eq - self.invested(), self.cash))
 
@@ -154,7 +161,7 @@ class Book:
         if max_usd is not None:
             budget = min(budget, max_usd)
         f = walk(asks, qq, self.margin, budget, rate, expo)
-        if f["shares"] < MIN_SHARES:
+        if f["shares"] < MIN_SHARES or f["cost"] < MIN_USD:
             return None
         pos = Position(mid, side, f["shares"], f["cost"], f["fee"], ts, qq, a, e, m.get("event_id") or mid,
                        m["category"], end, str(m.get("question") or "")[:200], mark=a)
@@ -187,13 +194,13 @@ class Book:
 
     # ------------------------------------------------------------ persistence
     def to_json(self) -> dict:
-        return {"name": self.name, "margin": self.margin, "cash": self.cash,
+        return {"name": self.name, "margin": self.margin, "cash": self.cash, "start": self.start,
                 "positions": {k: vars(v) for k, v in self.positions.items()},
                 "traded": sorted(self.traded), "n_closed": len(self.closed)}
 
     @classmethod
     def from_json(cls, d: dict) -> "Book":
-        b = cls(d["name"], float(d["margin"]), float(d["cash"]))
+        b = cls(d["name"], float(d["margin"]), float(d["cash"]), start=float(d.get("start") or START_USD))
         b.positions = {k: Position(**v) for k, v in (d.get("positions") or {}).items()}
         b.traded = set(d.get("traded") or [])
         return b
@@ -205,9 +212,10 @@ def book_dir(name: str) -> Path:
     return store.path("paper", name)
 
 
-def load(name: str, margin: float) -> Book:
+def load(name: str, margin: float, start: float = START_USD, cap_market: float = CAP_MARKET) -> Book:
     d = store.read_json(book_dir(name) / "state.json")
-    b = Book.from_json(d) if d else Book(name, margin)
+    b = Book.from_json(d) if d else Book(name, margin, start, start=start)
+    b.cap_market = cap_market
     b.closed = read_csv(book_dir(name) / "closed.csv")
     return b
 

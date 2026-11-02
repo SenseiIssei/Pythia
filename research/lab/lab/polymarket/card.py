@@ -30,7 +30,8 @@ def book_rows(res: dict) -> dict[str, dict]:
     out = {}
     for row in res.get("daily") or []:
         n = int(row["closed_total"])
-        out[row["book"]] = {"equity": float(row["equity"]), "pnl": float(row["equity"]) - B.START_USD,
+        start = B.SMALL_USD if row["book"].endswith("_100") else B.START_USD
+        out[row["book"]] = {"equity": float(row["equity"]), "pnl": float(row["equity"]) - start, "start": start,
                             "open": int(row["open"]), "resolved": n, "won": int(row["won_total"]),
                             "opened": int(row["opened"]), "settled": int(row["settled"]),
                             "realized": float(row["realized"])}
@@ -58,7 +59,8 @@ def daily_card(res: dict, lang: str = "en"):
     t = i18n.t
     rows = book_rows(res)
     # One row per book, so both fit a phone screen at a glance.
-    table = [[t(f"pm_book_{name}", lang), i18n.money(r["equity"], 0, lang), i18n.signed_money(r["pnl"], 0, lang),
+    dp = lambda r: 2 if r["start"] < 1000 else 0                                       # noqa: E731
+    table = [[t(f"pm_book_{name}", lang), i18n.money(r["equity"], dp(r), lang), i18n.signed_money(r["pnl"], dp(r), lang),
               str(r["open"]), f"{r['won']}/{r['resolved']}" if r["resolved"] else "0/0"]
              for name, r in rows.items()]
     parts: list = [notify.Table([t("pm_col_book", lang), t("pm_equity", lang), t("pm_col_start", lang),
@@ -112,10 +114,12 @@ def feed(res: dict) -> dict:
     cs, ms = res.get("claude_score") or {}, res.get("model_score") or {}
     items = []
     for name, r in rows.items():
-        items.append({"label": "Model book" if name == "pm_model" else "Claude book",
-                      "value": f"${r['pnl']:+,.0f}",
+        items.append({"label": ("Model book" if name.startswith("pm_model") else "Claude book")
+                      + (" (100 EUR)" if name.endswith("_100") else ""),
+                      "value": f"${r['pnl']:+,.2f}" if r["start"] < 1000 else f"${r['pnl']:+,.0f}",
                       "status": "ok" if r["pnl"] >= 0 else "watch",
-                      "detail": f"{r['open']} open, {r['resolved']} resolved ({r['won']} won), paper, $10,000 start",
+                      "detail": f"{r['open']} open, {r['resolved']} resolved ({r['won']} won), paper, "
+                                f"${r['start']:,.0f} start",
                       "link": "study:polymarket", "importance": 40})
     for label, sc in (("Claude vs market", cs), ("Model vs market (live)", ms)):
         if sc.get("resolved"):
@@ -129,11 +133,11 @@ def feed(res: dict) -> dict:
                           "link": "study:polymarket", "importance": 20})
     for f in sorted(res.get("fills") or [], key=lambda f: -f["edge"])[:8]:
         items.append({"label": (f.get("question") or f["market_id"])[:90], "value": f"{f['side'].upper()} {f['ask']:.3f}",
-                      "detail": f"{'Model' if f['book'] == 'pm_model' else 'Claude'} book, forecast {f['q']:.3f}, "
+                      "detail": f"{'Model' if f['book'].startswith('pm_model') else 'Claude'} book, forecast {f['q']:.3f}, "
                                 f"edge {f['edge'] * 100:.1f} points, stake ${f['usd']:,.0f}",
                       "importance": min(80, int(30 + f["edge"] * 300)), "at_ms": f["ts_ms"]})
     n_open = sum(r["open"] for r in rows.values())
-    head = (f"Paper only. {n_open} open positions in two books; Claude has {cs.get('forecasts', 0)} forecasts on "
+    head = (f"Paper only. {n_open} open positions in {len(rows)} books; Claude has {cs.get('forecasts', 0)} forecasts on "
             f"record ({cs.get('resolved', 0)} resolved). Nothing has beaten the market price yet.")
     if cs.get("passes") or ms.get("passes"):
         head = "Paper only. A forecaster beats the market price on resolved markets; see the study before reading more into it."

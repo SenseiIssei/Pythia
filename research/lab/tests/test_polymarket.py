@@ -236,6 +236,22 @@ def test_book_refuses_extremes_far_ends_updown_and_small_edges():
     assert bk.consider(market(), 0.9, 0, [(0.5, 3)], [(0.6, 1e6)]) is None        # under 5 shares of depth
 
 
+def test_the_100_eur_book_sizes_to_its_stake_and_keeps_the_clob_minimums(pmdir):
+    bk = B.load("pm_model_100", 0.03, B.SMALL_USD, B.SMALL_CAP_MARKET)
+    assert bk.cash == B.SMALL_USD and bk.start == B.SMALL_USD
+    f = bk.consider(market(), 0.2, 0, [(0.30, 1e6)], [(0.72, 1e6)])
+    assert f and f["usd"] == pytest.approx(0.05 * B.SMALL_USD, rel=1e-6)    # Kelly 7 % capped at 5 %: 5.80 USD
+    B.save(bk)
+    b2 = B.load("pm_model_100", 0.03, B.SMALL_USD, B.SMALL_CAP_MARKET)
+    assert b2.start == B.SMALL_USD and b2.cap_market == B.SMALL_CAP_MARKET and set(b2.positions) == {"m1"}
+    # at 2 % a market (2.32 USD) five shares at 72 cents (3.60 USD) never fit: the reason for the 5 %
+    assert B.Book("t", 0.03, B.SMALL_USD, start=B.SMALL_USD).consider(
+        market(), 0.2, 0, [(0.30, 1e6)], [(0.72, 1e6)]) is None
+    # five cheap shares that cost under the CLOB's $1 are refused too
+    tiny = B.Book("t", 0.03, 15.0, start=15.0, cap_market=0.05)        # 0.75 USD: 7.5 shares at 10 cents
+    assert tiny.consider(market(), 0.95, 0, [(0.10, 1e6)], [(0.95, 1e6)]) is None
+
+
 def test_book_round_trips_through_json(pmdir):
     bk = B.Book("pm_model", 0.03)
     bk.consider(market(), 0.2, 0, [(0.30, 1e6)], [(0.72, 1e6)])

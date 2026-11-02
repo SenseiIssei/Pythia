@@ -12,6 +12,10 @@ PAPER ONLY: no wallet, no key, no order. Two books of $10,000 play money each
               fit on every resolved state), margin 3 points
   pm_claude   q from the newest Claude forecast under 7 days old, margin 5 points
 
+and their twins at 100 EUR (116 USD, from 2026-11-02, the owner's real stake), the same q,
+margin and fills on the same books, 5 % a market and the CLOB's $1 and five-share minimums:
+pm_model_100, pm_claude_100. Polymarket refuses orders from Germany: these stay paper.
+
 Each day every candidate market the rule may trade gets the model's q, which is
 written to forecasts/model_ledger.jsonl with the market's mid at that time, so
 the model is scored forward on live markets exactly like Claude.
@@ -35,7 +39,11 @@ import polars as pl
 
 from . import api, book as B, collect, forecast as F, markets as M, panel as P, store
 
-BOOKS = {"pm_model": 0.03, "pm_claude": 0.05}
+# name: (margin, whose q, start USD, cap a market)
+BOOKS = {"pm_model": (0.03, "model", B.START_USD, B.CAP_MARKET),
+         "pm_claude": (0.05, "claude", B.START_USD, B.CAP_MARKET),
+         "pm_model_100": (0.03, "model", B.SMALL_USD, B.SMALL_CAP_MARKET),
+         "pm_claude_100": (0.05, "claude", B.SMALL_USD, B.SMALL_CAP_MARKET)}
 BIG_EDGE = 0.10
 MAX_ALERTS = 3
 MIN_SCORED = 200
@@ -281,7 +289,7 @@ def run(dry_run: bool = False, do_forecast: bool = False, collect_now: bool = Tr
             log(f"forecast failed: {e}")
     levels = side_levels(books)
     recs = {r["id"]: r for r in live.iter_rows(named=True)}
-    bks = {n: B.load(n, m) for n, m in BOOKS.items()}
+    bks = {n: B.load(n, m, start, cap) for n, (m, _, start, cap) in BOOKS.items()}
     claude_rows = store.read_jsonl(F.ledger_path())
     model_rows = store.read_jsonl(store.path("forecasts", "model_ledger.jsonl"))
     ids = {str(f["market_id"]) for f in claude_rows + model_rows} | {k for b in bks.values() for k in b.positions}
@@ -304,8 +312,8 @@ def run(dry_run: bool = False, do_forecast: bool = False, collect_now: bool = Tr
     q_model = model_q(model, client, cands, levels, ts, log) if model else {}
     newest = F.latest(claude_rows, ts, 7.0)
     q_claude = {m: float(f["p_yes"]) for m, f in newest.items()}
-    fills = step_book(bks["pm_model"], cands, q_model, levels, ts) + \
-        step_book(bks["pm_claude"], cands, q_claude, levels, ts)
+    qs = {"model": q_model, "claude": q_claude}
+    fills = [f for n, (_, who, _, _) in BOOKS.items() for f in step_book(bks[n], cands, qs[who], levels, ts)]
     # the model's forward ledger
     mrows = []
     for r in cands:
