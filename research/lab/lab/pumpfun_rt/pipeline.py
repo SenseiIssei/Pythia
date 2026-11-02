@@ -1147,8 +1147,8 @@ class Pipeline:
             return None
         tx = eng.cost_of(s.name).tx_lamports()
         vn = v - tx
-        if vn > p.get("hz_peak", -1.0):
-            p["hz_peak"], p["hz_peak_ms"] = vn, t
+        if vn > p.get("hz_peak", -math.inf):              # worth less than the fee at the first ask (-1.0 before:
+            p["hz_peak"], p["hz_peak_ms"] = vn, t           # no peak kept, KeyError below in the study's replay)
         if t - p.get("last_hz_ms", -1e18) < RISK_EVERY_MS:
             return False
         p["last_hz_ms"] = t

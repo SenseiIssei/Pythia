@@ -684,6 +684,50 @@ def test_the_study_replays_once_and_gives_the_two_passes_numbers(tmp_path, monke
     assert len(P.STRATEGIES) and len(res["results"]) == len(S.RULES) + 1 + len(P.STRATEGIES)
 
 
+def test_the_study_keeps_its_rules_trades_slim_and_frees_pass_1_before_training(tmp_path, monkeypatch):
+    """Exit 137 from 2026-10-31 (the 8 GB, 12 to 14 days recorded; the retrain behind it did not run for 3 days):
+    e0's 66 rules close about 135,000 paper trades a day as 27-field records (1.3 kB each, 2.4 GB at 14 days), and
+    model_half kept pass 1's engine, its packed rows, next to their copies while the models trained. The rules'
+    trades now keep the fields the study reads, pass 1's engine is gone before the training; the same numbers
+    (test_the_study_replays_once_and_gives_the_two_passes_numbers compares with the full records)."""
+    import gc
+    import weakref
+    from lab.pumpfun_rt import study
+    synth_store(tmp_path, hours=10)
+    monkeypatch.setattr(store, "base", lambda: tmp_path)
+    monkeypatch.setattr("lab.pumpfun_rt.study.WARM_DAYS", 0)
+    engines, alive = [], []
+    replay = sim.replay
+
+    def spy(days, eng, root=None, progress=None, until_ms=None):
+        out = replay(days, eng, root, progress=progress, until_ms=until_ms)
+        engines.append(weakref.ref(eng) if eng.entry_until is not None else eng)
+        return out
+    train_all = M.train_all
+
+    def train(rows, *a, **kw):
+        gc.collect()
+        alive.append([e() is not None for e in engines if isinstance(e, weakref.ref)])
+        return train_all(rows, *a, **kw)
+    monkeypatch.setattr(sim, "replay", spy)
+    monkeypatch.setattr(M, "train_all", train)
+    res = study.run(now_ms=T0 + 3 * 86_400_000, root=tmp_path, log=lambda *a: None, shadow={}, parallel=False)
+    assert alive == [[False]], "pass 1's engine is freed before the models train"
+    e0 = [e for e in engines if not isinstance(e, weakref.ref) and len(e.rules) == 3 * len(S.RULES)]
+    assert len(e0) == 1 and len(e0[0].closed) > 0
+    assert all(tuple(t) == study.TRADE_KEYS for t in e0[0].closed)
+    assert sum(r["stats"]["n"] + r["is_stats"]["n"] for r in res["results"] if not r.get("pipeline")) > 0
+    full = {k: None for k in ("rule", "family", "mint", "name", "symbol", "created_ms", "signal_ms", "land_ms",
+                              "exit_signal_ms", "exit_why", "prob", "gap", "age_s", "progress", "signal_price",
+                              "entry_price", "exit_ms", "exit_price", "proceeds_sol", "pnl_sol", "ret", "hold_s",
+                              "dev_dumped", "breaks", "migrated", "lat_buy_ms", "slip")}
+    eng = type("E", (), {"closed": [dict(full), dict(full, ret=0.5)]})()
+    study.slim_closed(eng)("2026-10-20", 0)
+    assert eng.closed[1] == {k: (0.5 if k == "ret" else None) for k in study.TRADE_KEYS}
+    import sys
+    assert sys.getsizeof(eng.closed[0]) < sys.getsizeof(full) / 2
+
+
 def test_the_model_half_asks_each_row_once_and_gets_the_same_numbers():
     from lab.pumpfun_rt import study
     calls = []

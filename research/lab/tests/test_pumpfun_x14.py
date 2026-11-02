@@ -171,6 +171,21 @@ def test_the_hazard_exit_sells_when_the_upside_is_below_the_weighted_loss():
         assert t and t[0]["exit_why"] == why, (why, t)
 
 
+def test_the_hazard_exit_asks_a_position_worth_less_than_the_fee():
+    """A position worth less than the sale's fee at its first hazard ask kept no peak (the start was -1 lamport) and
+    the step features read it: KeyError 'hz_peak', the study's model half died on it."""
+    s = [x for x in P.STRATEGIES if x.name == "P_press10_hz"][0]
+    hz = {"hz_dump10": Const(0.9), "hz_up30": Const(0.01), "hz_policy": X.HzPolicy(1.0, 0.5, {})}
+    eng = sim.Engine([], costs=Fixed(), strategies=[s], models=hz)
+    cv = Curve(eng)
+    cv.buy(T0 + 500, SOL, BUYERS[0])
+    tok = eng.tokens[MINT]
+    p = {"cost_l": SOL // 2, "land_ms": T0 + 500}
+    assert eng.pipes[0].hazard(p, s, tok, T0 + 1_000, 0) is True
+    assert p["hz_peak"] == -Fixed().tx_lamports() and p["hz_peak_ms"] == T0 + 1_000
+    assert eng.pipes[0].hazard(p, s, tok, T0 + 3_000, SOL) is True and p["hz_peak_ms"] == T0 + 3_000
+
+
 def test_the_early_strategy_needs_its_models_and_its_threshold():
     s = [x for x in P.STRATEGIES if x.name == "P_early10"][0]
     feats = E.early_feature_list()

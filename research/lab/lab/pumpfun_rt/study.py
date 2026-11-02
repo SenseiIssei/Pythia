@@ -321,11 +321,11 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(1, mp_context=mp.get_context("spawn")) as ex:
             fut = ex.submit(model_half, job)
-            sim.replay(days, e0, root)
+            sim.replay(days, e0, root, progress=slim_closed(e0))
             half = fut.result()
     else:
         half = model_half(job)
-        sim.replay(days, e0, root)
+        sim.replay(days, e0, root, progress=slim_closed(e0))
     for line in half["log"]:
         log(line)
     pick = half["pick"]
@@ -381,6 +381,41 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
             "rows": len(table["t"])}
 
 
+# The fields of a rule's closed paper trade the study reads (trade_stats, daily_pnl, the bands, the pick) and
+# sim.Engine.drop_gapped's: e0's 66 rules close about 135,000 paper trades a day, at 1.3 kB a full record 2.4 GB at
+# 14 days, 0.45 kB slim. The study died on its 8 GB from 2026-10-31 (exit 137, 12 to 14 days recorded) and the
+# retrain behind it did not run.
+TRADE_KEYS = ("rule", "signal_ms", "exit_ms", "ret", "pnl_sol", "hold_s", "breaks", "dev_dumped", "exit_why", "gap")
+
+
+def slim_closed(eng):
+    """A replay's progress: after each day the engine's new closed trades keep TRADE_KEYS only (rules only:
+    pipeline strategies' trades, model_half's second engine, keep theirs for the exit mix and the capture)."""
+    done = 0
+
+    def slim(day: str, n: int) -> None:
+        nonlocal done
+        c = eng.closed
+        for i in range(done, len(c)):
+            c[i] = {k: c[i].get(k) for k in TRADE_KEYS}
+        done = len(c)
+    return slim
+
+
+def _table(f):
+    """A table or the error it raised (raised again where it is used)."""
+    try:
+        return f()
+    except Exception as e:
+        return e
+
+
+def _table_or_raise(x):
+    if isinstance(x, Exception):
+        raise x
+    return x
+
+
 # Counts of the record itself (every engine counts them alike): pass 2's are e0's; the rest add up over both engines.
 RECORD_COUNTS = {"tokens", "curve_trades", "curve_breaks", "curve_tokens", "curve_tokens_broken"}
 
@@ -431,7 +466,7 @@ def model_half(job: dict) -> dict:
                     early_rows=True, snipers=snipers, select=True, trend=True, social=social)
     e1.early.keep_frac = keep
     lab1 = e1.add_pipe(L2.RealLabelPipe(e1, R.Model()))     # Y9: the select models' rows, executed as live (R2)
-    sim.replay(days, e1, root, until_ms=split + 45 * 60_000)
+    sim.replay(days, e1, root, until_ms=split + 45 * 60_000, progress=slim_closed(e1))
     is_trades = [t for t in e1.closed if t["signal_ms"] < split]
     by_rule = defaultdict(list)
     for t in is_trades:
@@ -439,18 +474,24 @@ def model_half(job: dict) -> dict:
     cands = [(trade_stats(v)["mean"], trade_stats(v)["pnl_sol"], r) for r, v in by_rule.items()
              if len(v) >= MIN_IS_TRADES]
     pick = max(cands)[2] if cands else S.DEFAULT_PICK
-    is_models = M.train_all(e1.table(), until_ms=split)
-    # X14: the early and exit models the new strategies use, from in-sample rows and steps only
-    try:
-        is_models.update(XP.fit_live(e1.early.tables(), until_ms=split, log=log))
-    except Exception as e:                                   # the study goes on; the X14 books then wait
-        log(f"{NAME}: X14 in-sample models failed ({type(e).__name__}: {e})")
-    try:                                                     # Y9: the select models from in-sample rows only
-        is_models.update(SM.train(lab1.table(), until_ms=split))
-    except Exception as e:                                   # the study goes on; the Y9 books then wait
-        log(f"{NAME}: Y9 in-sample models failed ({type(e).__name__}: {e})")
+    # the tables first and then the engine freed: its packed rows next to their copies while the models trained were
+    # the peak of this process (exit 137 from 2026-10-31); a table that fails fails its training as before
+    rows1, x14, sel1 = _table(e1.table), _table(e1.early.tables), _table(lab1.table)
     pass1 = dict(e1.counts)
     del e1, lab1
+    is_models = M.train_all(_table_or_raise(rows1), until_ms=split)
+    del rows1
+    # X14: the early and exit models the new strategies use, from in-sample rows and steps only
+    try:
+        is_models.update(XP.fit_live(_table_or_raise(x14), until_ms=split, log=log))
+    except Exception as e:                                   # the study goes on; the X14 books then wait
+        log(f"{NAME}: X14 in-sample models failed ({type(e).__name__}: {e})")
+    del x14
+    try:                                                     # Y9: the select models from in-sample rows only
+        is_models.update(SM.train(_table_or_raise(sel1), until_ms=split))
+    except Exception as e:                                   # the study goes on; the Y9 books then wait
+        log(f"{NAME}: Y9 in-sample models failed ({type(e).__name__}: {e})")
+    del sel1
     log(f"{NAME}: pass 1 in {time.time() - t0:.0f} s, {len(is_trades)} in-sample trades, pick {pick}"
         + ("" if cands else f" (no rule had {MIN_IS_TRADES} in-sample trades: the default)"))
     del is_trades, by_rule
