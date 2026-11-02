@@ -124,6 +124,8 @@ AMM_WAIT = 20_000          # PumpSwap trades of unknown pools kept while their m
 POOL_QUEUE = 500           # F1: migrations waiting for their pool read (more are left to the stream, and counted)
 POOL_RETRY_S = 1.0         # F1: a pool or vault not there yet is read once more after this
 TAP_MAX_BYTES = 32_000_000  # F2: the tap file is rotated to creates.jsonl.1 past this (about four days)
+EXPECT_KEEP = 200_000      # C1: canonical pools of the coins created or completed, kept for a missed migration
+COMPLETE_WAIT_MS = 20_000  # C1: a completed curve with no migration on the stream after this: its pool is read
 
 
 def now_ms() -> int:
@@ -438,6 +440,58 @@ class Collector:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.tap: Tap | None = None                       # F2: every create row at once, for the live service
         self.xfer: TR.TransferWatch | None = None         # token transfers of migrated coins (transfers.py)
+        self.backfill = False                             # C1, the lab's collector only (run sets it; never live)
+        self.expect: collections.OrderedDict[str, tuple[str, int]] = collections.OrderedDict()
+        self.complete_wait: collections.OrderedDict[str, int] = collections.OrderedDict()
+
+    # ------------------------------------------------------------ C1: migrations the stream lost
+    def expect_pool(self, mint: str, ms: int) -> None:
+        """The pool a coin will migrate into (txbuild.canonical_pool), so a PumpSwap trade of it is known even
+        when the stream lost the migration."""
+        from .txbuild import canonical_pool
+        try:
+            pool = canonical_pool(mint)
+        except (ValueError, KeyError):
+            return
+        self.expect[pool] = (mint, ms)
+        self.expect.move_to_end(pool)
+        while len(self.expect) > EXPECT_KEEP:
+            self.expect.popitem(last=False)
+
+    def adopt(self, pool: str, ms: int, why: str):
+        """A migration the stream did not bring: the pool is remembered, read from the chain (pool_state) and
+        the PumpSwap trades that waited for it are kept. Returns (mint, ms) or None."""
+        got = self.expect.pop(pool, None)
+        if got is None or pool in self.pools:
+            return self.pools.get(pool)
+        mint = got[0]
+        self.counts[why] += 1
+        self.complete_wait.pop(mint, None)
+        self.remember_pool(pool, mint, ms)
+        self.want_pool({"mint": mint, "pool": pool})
+        if self.xfer is not None:
+            self.xfer.watch(mint, ms)
+        early = [w for w in self.amm_wait if w[0]["pool"] == pool]
+        if early:
+            self.amm_wait = collections.deque((w for w in self.amm_wait if w[0]["pool"] != pool), maxlen=AMM_WAIT)
+        for r, s in early:
+            r["mint"] = mint
+            self.keep("amm", r, self.clock.stamp(r["slot"], r["t"]), s)
+        return self.pools[pool]
+
+    def check_completes(self, ms: int) -> int:
+        """Completed curves whose migration has not come COMPLETE_WAIT_MS later: their pool is read anyway."""
+        n = 0
+        while self.complete_wait:
+            mint, t = next(iter(self.complete_wait.items()))
+            if ms - t < COMPLETE_WAIT_MS:
+                break
+            self.complete_wait.popitem(last=False)
+            from .txbuild import canonical_pool
+            pool = canonical_pool(mint)
+            if pool not in self.pools and pool in self.expect and self.adopt(pool, ms, "migrate_missed_complete"):
+                n += 1
+        return n
 
     # ------------------------------------------------------------ F1 and F2
     def want_pool(self, row: dict) -> None:
@@ -518,7 +572,11 @@ class Collector:
                 continue
             table, row = c
             if table == "amm":
+                if self.backfill:                           # C1: kept for the BOOST buyback (X14 r2)
+                    row["base_supply"], row["can_boost"] = ev.get("base_supply"), ev.get("can_boost")
                 hit = self.pools.get(row["pool"])
+                if hit is None and self.backfill and row["pool"] in self.expect:
+                    hit = self.adopt(row["pool"], recv_ms, "migrate_missed_amm")
                 if hit is None:
                     self.amm_wait.append((row, sig))        # its migration may still be on the way
                     continue
@@ -526,6 +584,11 @@ class Collector:
                     continue
                 row["mint"] = hit[0]
             elif table == "other" and row["kind"] == "migrate":
+                if row["pool"] in self.pools:               # C1 adopted it already: its late migration row only
+                    kept += self.keep(table, row, ct)
+                    continue
+                self.complete_wait.pop(row["mint"], None)
+                self.expect.pop(row["pool"], None)
                 self.remember_pool(row["pool"], row["mint"], recv_ms)
                 kept += self.keep(table, row, ct)
                 self.want_pool(row)
@@ -542,6 +605,12 @@ class Collector:
             kept += self.keep(table, row, ct, sig if table in ("trades", "amm") else None)
             if table == "creates" and self.meta:
                 self.queue_meta(row)
+            if self.backfill and (table == "creates" or (table == "other" and row["kind"] == "complete")):
+                if table == "other":                        # its migration should follow within seconds
+                    self.complete_wait[row["mint"]] = recv_ms
+                    while len(self.complete_wait) > POOL_QUEUE:
+                        self.complete_wait.popitem(last=False)
+                self.expect_pool(row["mint"], recv_ms)
         if kept:
             self.last_event_ms = recv_ms
         return kept
@@ -745,6 +814,7 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     from . import poolread
     if writer is not None and os.environ.get("PYTHIA_PF_TAP", "1") != "0":
         col.tap = Tap()
+    col.backfill = writer is not None                     # C1: never in the live service's collector
     if TR.enabled():
         col.xfer = TR.TransferWatch(col.keep, col.counts)
         col.xfer.on_tx = col.handle_tx                    # its PumpSwap trades fill the program links' gaps
@@ -788,7 +858,8 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
         tasks = [asyncio.create_task(col.stream(session, urls[k % len(urls)], p, k, stop, commitment))
                  for p in programs for k in range(LINKS if p == E.PUMP else AMM_LINKS)]
         if pool_read:
-            tasks.append(asyncio.create_task(col.pool_worker()))
+            tasks.append(asyncio.create_task(col.pool_worker(
+                lambda mint, pool: poolread.read(mint, pool, with_supply=True))))
         if grpc_url:
             if geyser.available():
                 for j, p in enumerate(programs):
@@ -818,6 +889,8 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
                 await asyncio.sleep(1.0)
                 if shadow is not None:                     # the book runs on chain time, not the wall clock
                     shadow.tick(col.clock.latest or now_ms())
+                if col.backfill:
+                    col.check_completes(now_ms())
                 if writer is not None and writer.due():
                     batches = writer.take()
                     await asyncio.to_thread(writer.write, batches)

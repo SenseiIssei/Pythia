@@ -9,6 +9,10 @@ two getMultipleAccounts calls at "confirmed". The result is one row of the store
 
   {"kind": "pool_state", "t": receive ms, "slot": the read's slot, "mint", "pool", "pb", "pq", "vq"}
 
+(C1, the lab's collector only: with supply=True the mint is read in the same call and the row also carries
+"base_supply", the mint's supply, and "can_boost", whether the pool has virtual quote reserves: the program refuses
+to boost a pool without them, PoolCannotBoost; the event's own flag is on every amm row of the lab's record)
+
 which the engine takes like a pool trade's state without being a trade (sim.Engine.pool_state): a signal waiting
 for the pool's state goes on, nothing fills on it. Recorded, so a replay sees what the live bot saw.
 
@@ -30,6 +34,7 @@ from .txbuild import OFFSETS
 DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
 TIMEOUT_S = 5.0
 AMOUNT_OFF = 64                        # an SPL token account's amount (Token and Token-2022 alike)
+SUPPLY_OFF = 36                        # an SPL mint's supply (after its mint authority option)
 
 
 def enabled(env=None) -> bool:
@@ -80,7 +85,13 @@ def amount(data: bytes | None) -> int | None:
     return int.from_bytes(data[AMOUNT_OFF:AMOUNT_OFF + 8], "little")
 
 
-def read(mint: str, pool: str, call=None, clock=None) -> dict | None:
+def supply(data: bytes | None) -> int | None:
+    if not data or len(data) < SUPPLY_OFF + 8:
+        return None
+    return int.from_bytes(data[SUPPLY_OFF:SUPPLY_OFF + 8], "little")
+
+
+def read(mint: str, pool: str, call=None, clock=None, with_supply: bool = False) -> dict | None:
     """The pool_state row of a pool, or None when the pool or a vault is not there yet (or empty)."""
     url = rpc_url()
     call = call or (lambda method, params: post(url, method, params))
@@ -88,10 +99,13 @@ def read(mint: str, pool: str, call=None, clock=None) -> dict | None:
     if not pdata:
         return None
     base_vault, quote_vault, vq = parse_pool(pdata)
-    slot, (bdata, qdata) = accounts(call, [base_vault, quote_vault])
-    pb, pq = amount(bdata), amount(qdata)
+    slot, got = accounts(call, [base_vault, quote_vault] + ([mint] if with_supply else []))
+    pb, pq = amount(got[0]), amount(got[1])
     if not pb or not pq:
         return None
     t = int(clock() if clock else time.time() * 1000)
-    return {"kind": "pool_state", "t": t, "slot": slot or None, "tx": None, "mint": mint, "user": None,
-            "pool": pool, "pb": pb, "pq": pq, "vq": vq}
+    row = {"kind": "pool_state", "t": t, "slot": slot or None, "tx": None, "mint": mint, "user": None,
+           "pool": pool, "pb": pb, "pq": pq, "vq": vq}
+    if with_supply:
+        row["base_supply"], row["can_boost"] = supply(got[2]), vq > 0
+    return row

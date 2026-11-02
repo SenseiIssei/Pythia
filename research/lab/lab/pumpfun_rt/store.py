@@ -20,8 +20,10 @@ Tables:
            watched, for MIGRATED_KEEP_H hours: time, pool, mint, side, base and quote
            amounts, trader, the pool's reserves before the trade, fees, and the pool's
            virtual_quote_reserves before the trade (vq, signed; null in parts written
-           before it was recorded)
-  other    curve completions, migrations (pool, SOL and tokens moved), and "gap" rows:
+           before it was recorded), and since C1 (2026-11-02) the event's base_supply and
+           can_boost (null before)
+  other    curve completions, migrations (pool, SOL and tokens moved), pool reads (pool_state: the
+           reserves and, since C1, base_supply and can_boost; null before), and "gap" rows:
            a stream (program in `user`) was not connected from t0 to t, so nothing
            between is known for it
   meta     socials and description flags from a token's metadata file, when fetched, and (Y14) its X link's
@@ -75,11 +77,15 @@ SCHEMAS: dict[str, pa.Schema] = {
                          ("fb", I32), ("cfb", I32), ("ix", STR), ("quote", STR), ("bts", I64)]),
     "amm": pa.schema([("t", I64), ("slot", I64), ("tx", I64), ("pool", STR), ("mint", STR), ("buy", BOOL),
                       ("base", I64), ("quote", I64), ("user", STR), ("pb", I64), ("pq", I64), ("lpb", I32),
-                      ("pfb", I32), ("cfb", I32), ("bts", I64), ("vq", I64)]),
+                      ("pfb", I32), ("cfb", I32), ("bts", I64), ("vq", I64),
+                      # C1 (2026-11-02): the event's base_supply and can_boost (the BOOST buyback, X14 r2)
+                      ("base_supply", I64), ("can_boost", BOOL)]),
     "other": pa.schema([("kind", STR), ("t", I64), ("slot", I64), ("tx", I64), ("mint", STR), ("user", STR),
                         ("pool", STR), ("sol", I64), ("tok", I64), ("t0", I64), ("bts", I64),
                         # F1's pool_state (poolread.py): the pool's reserves read from the chain at its migration
-                        ("pb", I64), ("pq", I64), ("vq", I64)]),
+                        ("pb", I64), ("pq", I64), ("vq", I64),
+                        # C1 (2026-11-02): on pool_state, the mint's supply and whether the pool can be boosted
+                        ("base_supply", I64), ("can_boost", BOOL)]),
     "meta": pa.schema([("t", I64), ("mint", STR), ("ok", BOOL), ("twitter", BOOL), ("telegram", BOOL),
                        ("website", BOOL), ("desc_len", I32), ("image", BOOL),
                        # Y14: the links normalised (collector.meta_social), nothing else of the document
