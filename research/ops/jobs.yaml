@@ -1088,6 +1088,23 @@ jobs:
     timeout: 2m
     grace: 10m
 
+  # C1 (research/lab/lab/pumpfun_rt/coverage.py): how complete the record is, yesterday and today so far: migrated
+  # coins with a pool read and a creation row, the live bot's mints covered (reports/pumpfun_rt/live_trades.json,
+  # read only), the stream gaps and the receive time's offset to block time; reports/pumpfun_rt/coverage.json and .md.
+  # The check turns red under 90 % live-mint coverage on a day from 2026-11-03. Reads the record only; paper only.
+  - name: pumpfun-rt-coverage
+    description: real-time pump.fun record, yesterday's and today's coverage (pool reads, creation rows, live mints, stream gaps, clock offset), reports/pumpfun_rt/coverage.md
+    schedule: "15 0,12 * * *"
+    command: python -m lab.pumpfun_rt.coverage
+    resources: {cpus: 1, memory: 2g}
+    timeout: 20m
+  - name: pumpfun-rt-coverage-check
+    description: real-time pump.fun record covered at least 90 % of the live bot's mints on the newest day with live trades (from 2026-11-03), and the coverage report is fresh
+    schedule: "45 0,12 * * *"
+    command: python -m lab.pumpfun_rt.coverage --check
+    resources: {cpus: 1, memory: 256m}
+    timeout: 2m
+
   # The live gate wants a successful dry run of the live strategy's venue within 24 hours
   # (docs/PUMPFUN-LIVE.md, step 7). This keeps it fresh: simulateTransaction only, nothing is
   # signed or sent, and the wallet file is never opened (the address comes from its .pub). A
