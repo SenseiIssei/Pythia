@@ -1172,3 +1172,46 @@ def test_system_health_includes_every_job(tmp_path):
     assert by["job bad"]["ok"] is False and "exit 1" in by["job bad"]["detail"]
     assert "disk" in by and not s["ok"]
     assert (tmp_path / "data" / "_health" / "jobs.json").exists()
+
+
+# The heavy lock over the night as the runner takes it: each job at its fire waits up to lock_wait for the lock,
+# then holds it; earlier fires get it first. Hold times in seconds from the run records of 2026-11-01 and
+# 2026-11-02 (pumpfun-factory 8,672 s and its 150 min timeout; factory-small and backfill once the lock was
+# theirs); features holds it for its whole timeout, the worst case.
+HEAVY_NIGHTS = {
+    "2026-11-01": {"pumpfun-factory": 8672, "factory-small": 14, "backfill": 916},
+    "2026-11-02": {"pumpfun-factory": 9005, "factory-small": 26, "backfill": 916},
+}
+
+
+def replay_heavy_night(t: jobs.Table, day: str, hold: dict[str, int]) -> dict[str, str]:
+    d0 = datetime.fromisoformat(day).replace(tzinfo=UTC)
+    fires = []
+    for j in t.jobs.values():
+        if "heavy" not in j["locks"] or not j["enabled"] or j["cron"] is None or \
+                (j["name"] not in hold and j["name"] != "features"):
+            continue
+        f = j["cron"].next_after(d0 - timedelta(minutes=1))
+        while f and f < d0 + timedelta(hours=5):
+            fires.append((f, j["name"]))
+            f = j["cron"].next_after(f)
+    free, out = d0, {}
+    for f, name in sorted(fires):
+        j = t.job(name)
+        start = max(f, free)
+        if (start - f).total_seconds() > j["lock_wait_s"]:
+            out[name] = "skipped"
+            continue
+        free = start + timedelta(seconds=hold.get(name, j["timeout_s"]))
+        out[name] = "ok"
+    return out
+
+
+@pytest.mark.parametrize("day", sorted(HEAVY_NIGHTS))
+def test_features_gets_the_heavy_lock_on_the_nights_it_skipped(day):
+    # 2026-11-01 and 11-02: features at 02:20 waited its hour for the heavy lock and skipped, pumpfun-factory
+    # (01:00) held it until 03:24 and 03:30. At 00:20 it runs before the factory, which does not wait for it.
+    t = jobs.load_table(REPO_TABLE)
+    out = replay_heavy_night(t, day, HEAVY_NIGHTS[day])
+    assert out.get("features") == "ok", out
+    assert set(out.values()) == {"ok"}, out

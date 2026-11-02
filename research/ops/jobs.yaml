@@ -728,14 +728,18 @@ jobs:
   # interest, liquidations) as data/features/<group>/date=*/hourly.parquet, only days that are new or whose
   # raw files changed, then data/features/coverage.json (the weekly factory draws tree leaves from it). Raw
   # retention is not touched: the cache outlives the raw books. About a minute a night, 1.8 GB at most.
+  # 00:20, not 02:20 (2026-11-02): pumpfun-factory (01:00) held the heavy lock until 03:24 and 03:30 (its runtime
+  # grew from 81 min to its 150 min timeout), so features waited its hour and skipped on 11-01 and 11-02. The
+  # recorder compacts yesterday into day.parquet by about 00:07 and no heavy job runs before 01:00; 30 min timeout
+  # (the longest run took 13 min) and 20 min wait keep it out of the factory's way even in the worst case.
   - name: features
     description: feature store D3, caches the finished days of the recorded books, trades, funding, open interest and liquidations as hourly features, then their coverage
-    schedule: "20 2 * * *"
+    schedule: "20 0 * * *"
     command: python -m lab.features build
     resources: {cpus: 1, memory: 4g}
-    timeout: 1h
+    timeout: 30m
     lock: heavy
-    lock_wait: 1h
+    lock_wait: 20m
 
   - name: models
     description: model zoo, retrains what is due, shadow forecasts, drift, the Models page report
