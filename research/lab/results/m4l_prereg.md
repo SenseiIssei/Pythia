@@ -59,3 +59,23 @@ This study makes no pick and moves no book up the ladder.
 `lab.paper.hl_live`: Hyperliquid's L1 action signing checked against the published test vectors of the official
 Python SDK 0.24.0, read-only reconciliation from the public info endpoint, a send path behind every gate of the
 brief. No job, cron or container runs it; it is not armed. The owner arms it, never this study.
+
+## Addendum (registered 2026-11-02, before any code or run of it): the frozen panel and the ladder
+
+M4L's own results file says the judged cell rebuilt on the panel of 2026-11-02 makes a Sharpe of 1.20, where M4H
+made 1.79 on the panel of 2026-10-30: same code and windows, a different build of xs_daily's panel under reg7n's
+walk-forward refit. A band drawn from a series nobody can rebuild is not a fixed yardstick. So:
+
+- **Frozen panel.** `--export-series` cuts the panel at 2026-06-30 once, stores that cut as
+  `<data>/lab-cache/m4l_panel.parquet` with its stamp (the panel file's build date, its last day, the cut's
+  rows and a sha256 over its sorted columns), and every later export reads the frozen cut (and a reg7n score
+  cache keyed by its hash) instead of today's panel. The stamp goes into `m4l_series.json` and into each book's
+  `reports/forward/backtest/<book>.json`; the forward report names it as the band's source. A rebuild whose cut's
+  hash differs from the stored one is said, never silent.
+- **No new number.** The stamp is no score. Building the frozen cut and the series on the server is the owner's
+  run (heavy); it registers the same two trials as above, nothing more. The band, the in-band rule, the horizon
+  (each book's elapsed days) and the fill comparison stay as registered above.
+- **Ladder.** m4_hl_small runs M4H's judged cell, registered in `results/m4h_prereg.md` as amended by
+  `results/m4h2_prereg.md` (results `results/m4h.md`); m4_perps runs m4_residual's registered pick reg7n
+  (`results/m4_residual_prereg.md`, results `results/m4_residual.md`). The ladder maps them so; step 1 is then
+  judged by its own rule (its own commit, before the results' commit). No rule of the ladder changes.
