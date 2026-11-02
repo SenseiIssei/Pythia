@@ -1,6 +1,6 @@
 """R7b (results/dsr_bar_r7b_prereg.md): the pump.fun DSR per entry with F3's trial variance net of each trial's
 sampling noise and an effective trial count. PAPER ONLY: reads F3's ledger, changes nothing a live bot, a wallet or
-the engine reads; the ladder (lab.ops.ladder) uses noise_var, effective_trials and deflated only if PASSED.
+the engine reads. The simulation failed (results/dsr_bar_r7b.md): PASSED is False and the ladder keeps R7's bar.
 
   V_new = max(V_raw - M, M): V_raw the variance of the Sharpes per entry of F3's trials with MIN_ENTRIES, M the mean
           of their sampling variances q_i / n_i (q_i the fat-tail term of metrics.deflated_sharpe, n_i the entries)
@@ -37,13 +37,7 @@ REF = (5, 0.1, "f3")                       # the shape of the power runs
 PLANTED = (0.25, 0.5)                      # in sample: one genome's true Sharpe per entry
 FORWARD = (0.05, 0.1, 0.2, 0.3)            # forward: the candidate's true Sharpe per entry
 FWD_ENTRIES, FWD_DAYS = 1_000, 10
-PASSED = False                             # (c) not run yet
-
-
-def trials() -> list[dict]:
-    from ..ops.ladder import PF_RULES
-    return [{"id": f"pumpfun:r7b:{r}", "family": "pumpfun", "n": 1, "sharpe": None, "source": PREREG}
-            for r, (_, real) in PF_RULES.items() if real]
+PASSED = False                             # (c) failed on 2026-11-02 (results/dsr_bar_r7b.md): 16 of 19 shapes over 5 %
 
 
 def _q(r: dict) -> float:
@@ -266,23 +260,27 @@ def false_rate(shape: dict, c: float, rho: float, tails: str, reps: int, seed: i
             "v_raw": float(np.mean([j["v_raw"] for j in js])), "v_new": float(np.mean([j["v_new"] for j in js]))}
 
 
-def simulate(shape: dict, reps: int = REPS, extra_n: int = 0, log=print) -> dict:
-    rows = []
-    for i, (c, rho, t) in enumerate(SHAPES):
-        rows.append(false_rate(shape, c, rho, t, reps, SEED + i))
-        log(json.dumps(rows[-1]))
-    k, c, rho, t = SMALL
-    rows.append(false_rate(shape, c, rho, t, reps, SEED + 99, k=k))
-    log(json.dumps(rows[-1]))
+def _planted(shape: dict, mu: float, reps: int, seed: int) -> dict:
     c, rho, t = REF
-    planted = []
-    for j, mu in enumerate(PLANTED):
-        rng = np.random.default_rng(SEED + 200 + j)
-        js = [judge(family(shape, c, rho, t, rng, edge=mu)) for _ in range(reps)]
-        planted.append({"sr": mu, "power_old": float(np.mean([x["dsr_old"] >= 0.95 and x["best_genome"] == 0
-                                                              for x in js])),
-                        "power_new": float(np.mean([x["dsr_new"] >= 0.95 and x["best_genome"] == 0 for x in js]))})
-        log(json.dumps(planted[-1]))
+    rng = np.random.default_rng(seed)
+    js = [judge(family(shape, c, rho, t, rng, edge=mu)) for _ in range(reps)]
+    return {"sr": mu, "power_old": float(np.mean([x["dsr_old"] >= 0.95 and x["best_genome"] == 0 for x in js])),
+            "power_new": float(np.mean([x["dsr_new"] >= 0.95 and x["best_genome"] == 0 for x in js]))}
+
+
+def simulate(shape: dict, reps: int = REPS, extra_n: int = 0, log=print, workers: int = 1) -> dict:
+    """(c): every shape on its own seed (SEED + its index), so the workers change nothing but the time."""
+    from concurrent.futures import ProcessPoolExecutor
+    k, c0, rho0, t0 = SMALL
+    jobs = [(false_rate, (shape, c, rho, t, reps, SEED + i)) for i, (c, rho, t) in enumerate(SHAPES)]
+    jobs += [(false_rate, (shape, c0, rho0, t0, reps, SEED + 99, k))]
+    jobs += [(_planted, (shape, mu, reps, SEED + 200 + j)) for j, mu in enumerate(PLANTED)]
+    with ProcessPoolExecutor(max(1, workers)) as ex:
+        res = [f.result() for f in [ex.submit(fn, *a) for fn, a in jobs]]
+    for r in res:
+        log(json.dumps(r))
+    rows, planted = res[:len(SHAPES) + 1], res[len(SHAPES) + 1:]
+    c, rho, t = REF
     rng = np.random.default_rng(SEED + 300)
     nulls = []
     for _ in range(reps):
@@ -306,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sim", action="store_true")
     ap.add_argument("--real", action="store_true")
     ap.add_argument("--reps", type=int, default=REPS)
+    ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--root", default="/data")
     ap.add_argument("--out", default=None)
     a = ap.parse_args(sys.argv[1:] if argv is None else argv)
@@ -316,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         from .. import metrics
         from ..ops import ladder
         extra = metrics.trial_pool(extra=ladder.pf_trials())["n_trials"]
-        out["sim"] = simulate(out["shape"], a.reps, extra)
+        out["sim"] = simulate(out["shape"], a.reps, extra, workers=a.workers)
     if a.real:
         from ..ops import ladder
         from ..ops import notify

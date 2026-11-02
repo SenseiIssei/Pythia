@@ -64,17 +64,23 @@ def test_family_has_the_shape_asked():
     assert abs(x.mean()) < 0.01 and abs(x.std() - 1) < 0.01 and -1.6 < float(((x - x.mean()) ** 3).mean()) < -1.3
 
 
+F3ISH = {"nights": [(60, 3, False), (90, 8, True)], "entries": [0, 0, 2, 20, 25, 30, 40, 60, 120, 300, 600],
+         "skew": 0.0, "kurt": 3.0}
+
+
 def test_false_pass_rate_reproduced_on_a_small_family():
-    a = D.false_rate(SMALL, 5, 0.1, "f3", 30, seed=7)
-    b = D.false_rate(SMALL, 5, 0.1, "f3", 30, seed=7)
-    assert a == b and a["trials"] == 60 and a["reps"] == 30
-    assert 0 <= a["false_new"] <= 1 and 0 <= a["false_old"] <= 1
-    n = D.false_rate(SMALL, 1, 0.0, "normal", 30, seed=7)
-    assert n["false_new"] <= 0.1 and n["false_old"] <= 0.1                    # normal tails, no copies: held
-    assert n["genomes"] == 60 and n["n_eff"] <= 60
+    """The failure of (c) on a family of 150 trials with F3's short trials, copies, a market day and F3's tails: the
+    in-sample best passes the new bar in 9 of 100 null families (the old bar 6), over the 5 % allowed."""
+    a = D.false_rate(F3ISH, 5, 0.3, "f3", 100, seed=11)
+    assert a == D.false_rate(F3ISH, 5, 0.3, "f3", 100, seed=11) and a["trials"] == 150
+    assert (a["false_old"], a["false_new"]) == (0.06, 0.09) and a["false_new"] > D.FALSE_MAX
+    assert a["sr0_new"] < a["sr0_old"] and a["n_eff"] < a["trials"]
+    n = D.false_rate(F3ISH, 1, 0.0, "normal", 100, seed=11)
+    assert (n["false_old"], n["false_new"]) == (0.0, 0.02)                    # normal tails, no copies: held
+    assert n["genomes"] == 150 and n["n_eff"] <= 150
 
 
-def test_ladder_reads_the_new_bar_only_if_the_simulation_passed():
+def test_ladder_keeps_r7s_bar_since_the_simulation_failed():
     from lab.ops import ladder
     ids = {t["id"] for t in ladder.pf_trials()}
     assert D.PASSED is False and not any(i.startswith("pumpfun:r7b:") for i in ids)
