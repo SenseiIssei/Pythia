@@ -5,7 +5,8 @@ Pre-registered in results/m4h_prereg.md; its first run stopped at the signal che
 
     PYTHIA_CACHE=<xs_daily panel cache> PYTHIA_AGENT_OUT=<cache> PYTHIA_TRIALS_REGISTRY=<registry> \
         PYTHIA_REPORTS=<reports> flock <heavy lock> python -m lab.experiments.m4h [--no-register] [--report]
-    ... python -m lab.experiments.m4h --export-series [--no-register]   M4L: the paper books' backtest series
+    ... python -m lab.experiments.m4h --export-series [--no-register]   M4L: the paper books' backtest series,
+        built on the panel cut frozen once in $PYTHIA_CACHE/m4l_panel.parquet (its stamp in m4l_panel.json)
 
 reg7n unchanged (T6b's walk-forward refit on xs_daily's panel cut at 2026-06-30, the 2026-10-07 score cache being
 gone), the 100 most liquid perps of each day as xs_daily.book_buffer takes them and, out of sample, only the ones
@@ -21,6 +22,7 @@ Nothing here changes a book, a gate, the engine or a wallet.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -69,15 +71,15 @@ ETFS = {"SPY": "SPY", "EUNL": "EUNL.DE"}
 
 # ---------------------------------------------------------------- the signal and the matrices
 
-def load_matrices(log=print) -> dict:
-    """xs_daily's matrices of the panel cut at CUT with reg7n's walk-forward scores (T6b's refit, cached), plus each
-    column's Binance perp symbol."""
+def load_matrices(log=print, panel: pl.DataFrame | None = None, tag: str = "") -> dict:
+    """xs_daily's matrices of the panel cut at CUT (or of `panel`, M4L's frozen cut) with reg7n's walk-forward scores
+    (T6b's refit, cached as reg7n_scores<tag>), plus each column's Binance perp symbol."""
     from . import two_leads_t6 as t6
     from . import two_leads_t6b as t6b
     from . import xs_daily as xs
-    P = xs.build_panel().filter(pl.col("day") <= dc.us(CUT))
+    P = xs.build_panel().filter(pl.col("day") <= dc.us(CUT)) if panel is None else panel
     P, _ = xs.add_net_labels(P)
-    path = CACHE / "reg7n_scores.parquet"
+    path = CACHE / f"reg7n_scores{tag}.parquet"
     if path.exists():
         S = pl.read_parquet(path)
     else:
@@ -504,9 +506,9 @@ def eur_band(x: np.ndarray, usd: float, fx: np.ndarray, idx: np.ndarray) -> tupl
 
 # ---------------------------------------------------------------- the run
 
-def build(log=print) -> dict:
+def build(log=print, panel: pl.DataFrame | None = None, tag: str = "") -> dict:
     """Every input of the simulation as (T, N) matrices on xs_daily's calendar."""
-    M = load_matrices(log)
+    M = load_matrices(log, panel, tag)
     log(f"matrices {len(M['days'])} days x {len(M['syms'])} columns")
     score, liq = M["reg7n"], M["perp_adv28"]
     ok = np.isfinite(score) & np.isfinite(liq)
@@ -587,11 +589,76 @@ SERIES = {
                  "source": "reg7n 10/10 on Kraken Futures' coins (5 bps taker plus DT1's proxy, Binance funding)"},
 }
 SERIES_PREREG = "results/m4l_prereg.md"
+# M4L's addendum: the panel cut at CUT, frozen once next to the series, with its stamp. The judged cell made 1.79 on
+# the panel of 2026-10-30 and 1.20 on that of 2026-11-02 (results/m4l.md): the series must not move with the build.
+PANEL_FILE, PANEL_STAMP = "m4l_panel.parquet", "m4l_panel.json"
 
 
 def series_dir() -> Path:
     """Where the series live: $PYTHIA_CACHE, default <data>/lab-cache (the paper jobs' cache)."""
     return Path(os.environ.get("PYTHIA_CACHE", str(labdata.ROOT / "lab-cache")))
+
+
+def panel_hash(P: pl.DataFrame) -> str:
+    """sha256 over the panel's values, columns by name and rows by symbol and day (the data, not the file's bytes:
+    the same rows written twice hash the same). Numbers as float64 (null is NaN), text joined by NUL."""
+    P = P.sort(["symbol", "day"]).select(sorted(P.columns))
+    h = hashlib.sha256()
+    for c in P.columns:
+        s = P[c]
+        h.update(f"{c}:{s.dtype}\n".encode())
+        if s.dtype == pl.String:
+            h.update("\x00".join("" if v is None else v for v in s.to_list()).encode())
+        else:
+            h.update(np.ascontiguousarray(s.cast(pl.Float64).to_numpy(), dtype=np.float64).tobytes())
+    return h.hexdigest()
+
+
+def frozen_panel(out: Path | None = None, log=print) -> tuple[pl.DataFrame, dict]:
+    """(the cut panel, its stamp): <out>/m4l_panel.parquet when frozen (its hash checked against the stamp), else
+    today's xs_daily panel cut at CUT, frozen there now. The stamp: the panel file's build day, its last day, the
+    cut's rows and symbols, the hash."""
+    out = out or series_dir()
+    f, sf = out / PANEL_FILE, out / PANEL_STAMP
+    if f.exists() and sf.exists():
+        P, st = pl.read_parquet(f), json.loads(sf.read_text(encoding="utf-8"))
+        if panel_hash(P) != st.get("sha256"):
+            raise ValueError(f"{f} does not match its stamp {sf}: move both away to freeze a new cut")
+        log(f"frozen panel {st['sha256'][:12]} (built {st.get('built')}, {st['rows']} rows)")
+        return P, st
+    from . import xs_daily as xs
+    src = xs.CACHE / "xs_daily_panel.parquet"
+    full = xs.build_panel()
+    P = full.filter(pl.col("day") <= dc.us(CUT))
+    st = {"cut": CUT, "source": src.name,
+          "built": datetime.fromtimestamp(src.stat().st_mtime, timezone.utc).strftime("%Y-%m-%d")
+          if src.exists() else None,
+          "last_day": dc.day_str(int(full["day"].max())) if full.height else None,
+          "rows": P.height, "symbols": P["symbol"].n_unique(), "sha256": panel_hash(P),
+          "frozen": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    out.mkdir(parents=True, exist_ok=True)
+    P.write_parquet(f)
+    sf.write_text(json.dumps(st, indent=1), encoding="utf-8")
+    log(f"panel frozen: {st['sha256'][:12]} (built {st['built']}, {st['rows']} rows) to {f}")
+    return P, st
+
+
+def frozen_build(out: Path | None = None, log=print) -> dict:
+    """build() on the frozen cut, reg7n's scores cached under its hash; X["panel"] is its stamp."""
+    P, st = frozen_panel(out, log)
+    X = build(log, P, "_" + st["sha256"][:12])
+    X["panel"] = st
+    return X
+
+
+def series_stamp(out: Path | None = None) -> dict | None:
+    """The stamp of the panel the stored series were built from (m4l_series.json), None before the freeze."""
+    p = (out or series_dir()) / "m4l_series.json"
+    try:
+        st = json.loads(p.read_text(encoding="utf-8")).get("panel")
+    except (OSError, ValueError):
+        return None
+    return st if isinstance(st, dict) else None
 
 
 def export_series(X: dict, out: Path | None = None, kf: dict[str, int] | None = None, register: bool = True,
@@ -600,6 +667,10 @@ def export_series(X: dict, out: Path | None = None, kf: dict[str, int] | None = 
     registered with their in-sample Sharpes, then out of sample to <out>/<file> (day, ret: the decision day and
     the next day's net return). Returns {book: summary} (also <out>/m4l_series.json)."""
     out = out or series_dir()
+    old, new = series_stamp(out), X.get("panel")
+    if old and new and old.get("sha256") != new.get("sha256"):
+        log(f"panel changed: series were built on {old['sha256'][:12]} ({old.get('built')}), now "
+            f"{new['sha256'][:12]} ({new.get('built')})")
     days = X["days"]
     (i0, i1), (o0, o1) = windows or (window_rows(days, IS_FROM, IS_TO), window_rows(days, OOS_FROM, OOS_TO))
     kf = dt.kf_listings() if kf is None else kf
@@ -632,16 +703,17 @@ def export_series(X: dict, out: Path | None = None, kf: dict[str, int] | None = 
         log(f"{b}: Sharpe {res[b]['sharpe']:.2f}, {res[b]['days']} days to {out / c['file']}")
     X["F"], X["F2"] = nan, nan
     (out / "m4l_series.json").write_text(json.dumps({"generated": datetime.now(timezone.utc).isoformat(
-        timespec="seconds"), "pool": pool["n_trials"], "books": res}, indent=1, default=float), encoding="utf-8")
+        timespec="seconds"), "pool": pool["n_trials"], "panel": new, "books": res}, indent=1, default=float),
+        encoding="utf-8")
     return res
 
 
 def series(out: Path | None = None, build_missing: bool = True, log=print) -> dict[str, pl.DataFrame]:
-    """{book: (day, ret)} of the exported series; rebuilt (M4H's matrices and reg7n's refit, heavy: 16 minutes in M4L)
-    when one is missing and build_missing."""
+    """{book: (day, ret)} of the exported series; rebuilt on the frozen cut (M4H's matrices and reg7n's refit, heavy:
+    16 minutes in M4L) when one is missing and build_missing."""
     out = out or series_dir()
     if build_missing and not all((out / c["file"]).exists() for c in SERIES.values()):
-        export_series(build(log), out, log=log)
+        export_series(frozen_build(out, log), out, log=log)
     return {b: pl.read_parquet(out / c["file"]).sort("day") for b, c in SERIES.items() if (out / c["file"]).exists()}
 
 
@@ -656,10 +728,10 @@ def main(argv: list[str] | None = None) -> int:
     register = "--no-register" not in argv
     t_0 = time.time()
     log = lambda s: print(f"[{time.time() - t_0:.0f} s] {s}", flush=True)       # noqa: E731
-    X = build(log)
     if "--export-series" in argv:
-        export_series(X, register=register, log=log)
+        export_series(frozen_build(log=log), register=register, log=log)
         return 0
+    X = build(log)
     days = X["days"]
     X["F"], X["F2"] = np.full(X["R"].shape, np.nan), np.full(X["R"].shape, np.nan)
     i0, i1 = window_rows(days, IS_FROM, IS_TO)

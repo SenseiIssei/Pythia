@@ -35,13 +35,14 @@ Where the band comes from, best first:
       the autopilot's auto pick, which lets a book's forward result count
       only from EVIDENCE_MIN_DAYS days on. Then lab.paper.power (T8): what
       each record can prove and when, power.{md,json} and a section here.
-  python -m lab.paper.forward_report --export-backtests [--source DIR]
+  python -m lab.paper.forward_report --export-backtests [--source DIR] [--m4l-only]
       write the backtest series from whatever this machine has: the momentum
       books from the history files, the sweep candidates from the sweep's run
       caches, the tranche book re-simulated on the sweep's cached panel, M4
       from the xs_daily pick cache, m4_hl_small and m4_perps from
       lab.experiments.m4h's series in the lab cache (M4L; built there when
-      missing, which is heavy). --source reads those inputs from DIR instead
+      missing on the panel cut frozen once, which is heavy; the band names
+      the frozen panel's build day and hash). --source reads those inputs from DIR instead
       of PYTHIA_DATA (nothing is written there but a missing M4L series).
 
 Environment: PYTHIA_AUTOPILOT_STATE_URL (default http://127.0.0.1:8788/api/state;
@@ -343,9 +344,12 @@ def expectation(book: str, days: float) -> dict | None:
     if s is not None:
         band = bootstrap_band(np.array(s["returns"]), days, float(s.get("period_days", 1)))
         if band:
+            pan = s.get("panel") if isinstance(s.get("panel"), dict) else {}
             return {**band, "method": "bootstrap",
                     "source": f"{s.get('source', 'backtest')}, {len(s['returns'])} out-of-sample "
-                              f"{'days' if s.get('period_days', 1) == 1 else 'periods'}",
+                              f"{'days' if s.get('period_days', 1) == 1 else 'periods'}"
+                              + (f", frozen panel built {pan.get('built')} sha256 {str(pan['sha256'])[:12]}"
+                                 if pan.get("sha256") else ""),
                     "backtest_max_dd_pct": s.get("max_dd_pct")}
     st = report_stats(book)
     if st and st.get("vol"):
@@ -849,7 +853,7 @@ def _finite(v):
 # ---------------------------------------------------------------- export
 
 def _save_series(book: str, returns: np.ndarray, source: str, period_days: float = 1.0, first: str = "",
-                 last: str = "") -> None:
+                 last: str = "", panel: dict | None = None) -> None:
     r = np.asarray(returns, dtype=float)
     r = r[np.isfinite(r)]
     eq = np.cumprod(1 + r)
@@ -859,7 +863,7 @@ def _save_series(book: str, returns: np.ndarray, source: str, period_days: float
     (d / f"{book}.json").write_text(json.dumps({
         "book": book, "source": source, "period_days": period_days, "first": first, "last": last,
         "max_dd_pct": dd, "exported": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "returns": [round(float(x), 8) for x in r]}), encoding="utf-8")
+        **({"panel": panel} if panel else {}), "returns": [round(float(x), 8) for x in r]}), encoding="utf-8")
     print(f"{book}: {len(r)} periods from {source} ({first} to {last}), worst dip {dd:.1f} %")
 
 
@@ -954,8 +958,15 @@ def export_backtests(source: Path) -> None:
     except (StopIteration, OSError, KeyError, ValueError, TypeError, ImportError, AttributeError) as e:
         print("m4_ls skipped:", type(e).__name__, e, file=sys.stderr)
 
-    # M4L: M4H's judged cell for m4_hl_small and reg7n on Kraken Futures' coins for m4_perps, lab.experiments.m4h's
-    # export in the lab cache (out of sample 2024-01 to 2026-06), rebuilt there when missing (heavy: the reg7n refit).
+    export_m4l(source)
+
+
+def export_m4l(source: Path) -> None:
+    """M4L: M4H's judged cell for m4_hl_small and reg7n on Kraken Futures' coins for m4_perps, lab.experiments.m4h's
+    export in the lab cache (out of sample 2024-01 to 2026-06), rebuilt there on the frozen panel cut when missing
+    (heavy: the reg7n refit). Alone: --export-backtests --m4l-only (the other books' files stay as they are)."""
+    from .. import data as labdata
+
     old = labdata.ROOT
     labdata.ROOT = source
     try:
@@ -963,7 +974,7 @@ def export_backtests(source: Path) -> None:
         cache = Path(os.environ["PYTHIA_CACHE"]) if "PYTHIA_CACHE" in os.environ else source / "lab-cache"
         for book, df in m4h.series(cache).items():
             _save_series(book, df["ret"].to_numpy(), m4h.SERIES[book]["source"], 1, _day(df["day"][0]),
-                         _day(df["day"][-1]))
+                         _day(df["day"][-1]), m4h.series_stamp(cache))
     except Exception as e:  # noqa: BLE001 - one missing input must not stop the others
         print("m4_hl_small and m4_perps skipped:", type(e).__name__, e, file=sys.stderr)
     finally:
@@ -1039,7 +1050,7 @@ def main() -> int:
         src = ROOT
         if "--source" in sys.argv:
             src = Path(sys.argv[sys.argv.index("--source") + 1])
-        export_backtests(src)
+        (export_m4l if "--m4l-only" in sys.argv else export_backtests)(src)
         return 0
     data = build()
     try:  # T8: what each record can prove (reports/forward/power.md); evidence.json does not carry it

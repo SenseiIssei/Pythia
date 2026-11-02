@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import sys
 
 import numpy as np
 import pytest
@@ -372,13 +373,27 @@ def test_export_backtests_writes_m4_hl_small_and_m4_perps_from_m4hs_series(repor
     for book, mu in (("m4_hl_small", 0.0015), ("m4_perps", 0.001)):
         pl.DataFrame({"day": day0 + np.arange(900, dtype=np.int64) * 86_400_000_000,
                       "ret": rng.normal(mu, 0.012, 900)}).write_parquet(cache / m4h.SERIES[book]["file"])
-    monkeypatch.setattr(m4h, "build", lambda log=print: pytest.fail("both series are there: no rebuild"))
+    monkeypatch.setattr(m4h, "build", lambda log=print, panel=None, tag="": pytest.fail("both series are there"))
+    stamp = {"sha256": "c0ffee" + "0" * 58, "built": "2026-11-02", "rows": 9}
+    (cache / "m4l_series.json").write_text(json.dumps({"panel": stamp, "books": {}}))
     fr.export_backtests(tmp_path / "source")
     for book in ("m4_hl_small", "m4_perps"):
         s = fr.load_series(book)
         assert s is not None and len(s["returns"]) == 900 and s["first"] == "2024-01-01"
-        assert s["source"] == m4h.SERIES[book]["source"]
+        assert s["source"] == m4h.SERIES[book]["source"] and s["panel"] == stamp
+        band = fr.expectation(book, 10)
+        assert "frozen panel built 2026-11-02 sha256 c0ffee000000" in band["source"]
     assert "m4_hl_small and m4_perps skipped" not in capsys.readouterr().err
+
+
+def test_m4l_only_exports_the_two_m4_books_and_nothing_else(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(fr, "export_backtests", lambda src: calls.append(("all", src)))
+    monkeypatch.setattr(fr, "export_m4l", lambda src: calls.append(("m4l", src)))
+    monkeypatch.setattr(sys, "argv", ["x", "--export-backtests", "--m4l-only", "--source", str(tmp_path)])
+    assert fr.main() == 0 and calls == [("m4l", tmp_path)]
+    monkeypatch.setattr(sys, "argv", ["x", "--export-backtests"])
+    assert fr.main() == 0 and calls[-1] == ("all", fr.ROOT)
 
 
 def test_m4_hl_small_gets_a_band_and_a_position(reports):

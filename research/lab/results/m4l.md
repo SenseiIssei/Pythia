@@ -87,6 +87,33 @@ track" instead of "no backtest range".
   read only after every gate. A test for every gate. No job, cron or container runs it; `paper-m4-hl-small` stays
   dry run.
 
+## Addendum: the frozen panel (pre-registered in the addendum of `results/m4l_prereg.md`)
+
+**Two numbers for one cell.** M4H's judged cell (230 USD, k 10, 1x, taker) made a Sharpe of **1.79** out of
+sample on xs_daily's panel of 2026-10-30 (`results/m4h.md`) and **1.20** on the panel of 2026-11-02 (above). Same
+code, same windows, same cut at 2026-06-30. The cause is the panel: the paper jobs rebuild
+`<data>/lab-cache/xs_daily_panel.parquet` every morning, and reg7n's walk-forward refit (T6b) trains on whatever
+that build holds up to the cut, so a later build gives other scores and another book (M4H2 saw the same in
+sample: 1.30 against m4_residual's 0.93). Which rows moved between the two builds cannot be told now: neither
+panel was kept. So far no band was built at all on the server: `<data>/lab-cache` holds neither series and
+`reports/forward/backtest/` has no file for either book, so the forward report still says "early" and "no
+backtest range".
+
+**What changed (no new number, no trial).** `m4h --export-series` and the forward report's export now cut the
+panel once and freeze it: `<data>/lab-cache/m4l_panel.parquet` and its stamp `m4l_panel.json` (the panel file's
+build day, its last day, the cut's rows and symbols, a sha256 over its values sorted by symbol and day). Every
+later export reads the frozen cut (checked against its hash, refused when it does not match) and caches reg7n's
+scores under that hash, so a rebuild gives the same series. The stamp goes into `m4l_series.json` and into each
+book's `reports/forward/backtest/<book>.json`; the band's source in `reports/forward` reads "frozen panel built
+<day> sha256 <12 hex>". A rebuild on another panel says so in its log. `--export-backtests --m4l-only` exports the
+two books alone. The ladder now maps `m4_hl_small` to `m4h2_prereg.md` (M4H as amended) and `m4_perps` to
+`m4_residual_prereg.md`: both stand on step 1, missing step 2's tested record (T1 leak check, late record, era
+costs, DSR, PBO).
+
+**The cost model stays 4.5 + 4.4 bps** (`MODEL_SLIP`, the 4.37 bps the rebuilt judged cell paid per USD traded,
+above). Once the frozen series is built, its `m4l_series.json` gives the cell's `slip_bps` on the frozen panel;
+if it differs, `MODEL_SLIP` follows it in its own change.
+
 ## Anleitung für den Besitzer (M4 live mit etwa 200 EUR; nichts davon ist eingeschaltet)
 
 Erst nach mindestens 30 Tagen Forward-Record von `m4_hl_small` (frühestens 2026-11-29), wenn das Buch nicht unter

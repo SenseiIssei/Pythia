@@ -618,3 +618,33 @@ def test_the_report_registers_the_five_trials_once(env):
 def test_without_pumpfun_data_no_rule_is_listed(env):
     s1_book(env[0], 1)
     assert not [r for r in run(env).values() if r["kind"] == "rule"]
+
+
+def test_m4_books_map_to_their_preregistrations(env):
+    # M4L's addendum: m4_hl_small to M4H as amended by M4H2, m4_perps to m4_residual; step 1, next is step 2's record
+    data, results = env
+    commits = {**COMMITS, "m4h2_prereg.md": (ts("2026-10-30"), "d4"), "m4h.md": (ts("2026-10-30") + 3600, "e5"),
+               "m4_residual_prereg.md": (ts("2026-10-21"), "f6"), "m4_residual.md": (ts("2026-10-21") + 3600, "g7")}
+    for f in ("m4h2_prereg.md", "m4h.md", "m4_residual_prereg.md", "m4_residual.md"):
+        (results / f).write_text("# x\n", encoding="utf-8")
+    write(data, "reports/forward/latest.json", {"books": [
+        {"kind": "book", "name": "m4_hl_small", "since": "2026-10-30", "days": 4},
+        {"kind": "book", "name": "m4_perps", "since": "2026-10-21", "days": 15}]})
+    rows = run(env, commits)
+    for n, pre in (("m4_hl_small", "m4h2_prereg.md"), ("m4_perps", "m4_residual_prereg.md")):
+        r = rows[f"book:{n}"]
+        assert r["step"] == 1 and "prereg" not in r["missing"] and "late" in r["missing"]
+        assert any(x["id"] == "prereg" and x["value"] == pre for x in r["steps"]["1"])
+        assert "no tested record" in r["next"]
+    r = run(env, {**commits, "m4h2_prereg.md": (ts("2026-10-31"), "h8")})["book:m4_hl_small"]
+    assert r["step"] == 0 and r["missing"] == ["prereg_date"]                 # after its results: not one
+
+
+def test_the_m4_preregistrations_were_committed_before_their_results():
+    res = Path(__file__).resolve().parents[1] / "results"
+    for key in ("m4_hl_small", "m4_perps"):
+        pre, first = ladder.PREREG[key]
+        a, b = ladder.git_added(res / pre), ladder.git_added(res / first)
+        if a is None or b is None:
+            pytest.skip("no git history")
+        assert a[1] != b[1] and a[0] <= b[0]

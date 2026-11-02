@@ -102,6 +102,9 @@ PREREG = {
     "Y6": ("pumpfun_pool0_prereg.md", None),
     "Y8": ("pumpfun_exits_y8_prereg.md", "pumpfun_exits_y8.md"),
     "Y16": ("pumpfun_rugfilter_prereg.md", "pumpfun_rugfilter.md"),
+    # M4L's addendum: m4_hl_small runs M4H's judged cell (M4H as amended by M4H2), m4_perps m4_residual's pick reg7n.
+    "m4_hl_small": ("m4h2_prereg.md", "m4h.md"),
+    "m4_perps": ("m4_residual_prereg.md", "m4_residual.md"),
 }
 EQ1_JSON = "etf_books_eq1.json"     # EQ1's study numbers per book, variant and broker (lab.experiments.etf_books_eq1)
 # A paper book's name in T1's weekly leak check (lab.leak.checks.book_functions).

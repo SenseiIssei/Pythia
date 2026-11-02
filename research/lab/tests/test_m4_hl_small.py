@@ -209,6 +209,7 @@ def test_the_model_cost_is_the_judged_cells():
     # M4L: the judged cell's taker plus its mean slippage per USD traded, not taker plus 1 bp
     assert hs.MODEL_SLIP is not None and 2e-4 < hs.MODEL_SLIP < 10e-4
     assert "TAKER + MODEL_SLIP" in inspect.getsource(hs.main)
+    assert (hs.TAKER + hs.MODEL_SLIP) * 1e4 == pytest.approx(8.9)                     # 4.5 + 4.4 bps (results/m4l.md)
 
 
 def test_funding_since_sums_the_window_and_falls_back():

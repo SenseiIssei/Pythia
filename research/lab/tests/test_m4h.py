@@ -338,7 +338,7 @@ def test_export_series_writes_both_books_after_registering_their_trials(tmp_path
 
 def test_series_rebuilds_when_a_file_is_missing(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr(m4h, "build", lambda log=print: calls.append("build") or {"x": 1})
+    monkeypatch.setattr(m4h, "frozen_build", lambda out=None, log=print: calls.append("build") or {"x": 1})
 
     def fake_export(X, out, log=print):
         for c in m4h.SERIES.values():
@@ -349,3 +349,73 @@ def test_series_rebuilds_when_a_file_is_missing(tmp_path, monkeypatch):
     m4h.series(tmp_path)
     assert calls == ["build"]                                                 # both there: nothing rebuilt
     assert m4h.series(tmp_path / "none", build_missing=False) == {}
+
+
+# ---------------------------------------------------------------- M4L's addendum: the frozen panel
+
+def panel(n: int = 4) -> pl.DataFrame:
+    return pl.DataFrame({"day": [D0 + i * DAY for i in range(n)] * 2, "symbol": ["AUSDT"] * n + ["BUSDT"] * n,
+                         "P": [1.0 + i for i in range(2 * n)], "perp": [None] * n + ["BUSDT"] * n,
+                         "eligible": [True, False] * n})
+
+
+def test_panel_hash_is_the_data_not_the_order():
+    P = panel()
+    h = m4h.panel_hash(P)
+    assert len(h) == 64 and h == m4h.panel_hash(P.reverse().select(list(reversed(P.columns))))
+    assert h != m4h.panel_hash(P.with_columns(P=pl.col("P") + 1e-12))           # one value moved
+    assert h != m4h.panel_hash(P.head(7))
+    assert h != m4h.panel_hash(P.with_columns(perp=pl.lit("BUSDT")))           # null is not a text
+
+
+def test_frozen_panel_freezes_once_and_then_reads_the_frozen_cut(tmp_path, monkeypatch):
+    from lab.experiments import xs_daily as xs
+    full = panel(6).with_columns(day=pl.col("day") + (dt.us(m4h.CUT) - D0 - 3 * DAY))   # 2 days past the cut
+    src = tmp_path / "xs"
+    src.mkdir()
+    (src / "xs_daily_panel.parquet").write_bytes(b"x")
+    monkeypatch.setattr(xs, "CACHE", src)
+    monkeypatch.setattr(xs, "build_panel", lambda refresh=False: full)
+    out = tmp_path / "cache"
+    P, st = m4h.frozen_panel(out, log=lambda s: None)
+    assert P.height == 8 and P["day"].max() == dt.us(m4h.CUT)                # cut at CUT: 4 days of 6 a coin
+    assert st["rows"] == 8 and st["symbols"] == 2 and st["sha256"] == m4h.panel_hash(P)
+    assert st["last_day"] > m4h.CUT and st["built"] and st["cut"] == m4h.CUT
+    assert json.loads((out / m4h.PANEL_STAMP).read_text()) == st
+    # a later build of the panel (other values): the frozen cut stays
+    monkeypatch.setattr(xs, "build_panel", lambda refresh=False: full.with_columns(P=pl.col("P") * 2))
+    P2, st2 = m4h.frozen_panel(out, log=lambda s: None)
+    assert st2 == st and P2.equals(P)
+    # a frozen file that does not match its stamp is refused
+    P.with_columns(P=pl.col("P") + 1).write_parquet(out / m4h.PANEL_FILE)
+    with pytest.raises(ValueError, match="does not match its stamp"):
+        m4h.frozen_panel(out, log=lambda s: None)
+
+
+def test_frozen_build_caches_reg7n_under_the_panels_hash(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(m4h, "frozen_panel", lambda out=None, log=print: ("P", {"sha256": "ab" * 32}))
+    monkeypatch.setattr(m4h, "build", lambda log=print, panel=None, tag="": seen.update(panel=panel, tag=tag) or {})
+    X = m4h.frozen_build(tmp_path, log=lambda s: None)
+    assert seen == {"panel": "P", "tag": "_" + "ab" * 6} and X["panel"]["sha256"] == "ab" * 32
+
+
+def test_export_series_stores_the_panels_stamp_and_says_when_it_changed(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHIA_TRIALS_REGISTRY", str(tmp_path / "registry.jsonl"))
+    X = world(T=6, r=0.0)
+    X["R2"] = X["R"].copy()
+    X["perp"] = [f"C{j}USDT" for j in range(30)]
+    X["listed"] = np.ones((6, 30), dtype=bool)
+    X["F_hl"], X["F2_hl"] = np.zeros((6, 30)), np.zeros((6, 30))
+    X["P"][:] = 2.0
+    X["dec"] = [2] * 30
+    kf = {f"C{j}USDT": int(D0 // DAY) for j in range(30)}
+    assert m4h.series_stamp(tmp_path) is None
+    X["panel"] = {"sha256": "a" * 64, "built": "2026-11-02"}
+    lines = []
+    m4h.export_series(X, tmp_path, kf=kf, windows=((0, 1), (2, 5)), log=lines.append)
+    assert m4h.series_stamp(tmp_path) == X["panel"] and not any("panel changed" in x for x in lines)
+    X["panel"] = {"sha256": "b" * 64, "built": "2026-11-03"}
+    m4h.export_series(X, tmp_path, kf=kf, windows=((0, 1), (2, 5)), log=lines.append)
+    assert any("panel changed" in x and "aaaaaaaaaaaa" in x and "bbbbbbbbbbbb" in x for x in lines)
+    assert m4h.series_stamp(tmp_path)["sha256"] == "b" * 64
