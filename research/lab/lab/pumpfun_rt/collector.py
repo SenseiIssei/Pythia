@@ -78,6 +78,16 @@ Two hand-overs since 2026-10-28 (the live bot lost about 170 decisions to missin
       it off); the live service reads it every second (TapReader) and adopts a coin its own links missed,
       instead of skipping its migration for "creation not seen" (67 of 114 times this collector had the coin).
 
+C1 (2026-11-02, the lab's collector only; the live service's subclass leaves `backfill` off): the live twin found
+52 live trades without a pool read and 20 without a creation row in this record, because the public stream drops
+messages without any link going down (no gap row). Every created or completed coin's canonical pool
+(txbuild.canonical_pool) is kept; a PumpSwap trade of such a pool, or a completion whose migration has not come
+COMPLETE_WAIT_MS later, adopts the pool as if its migration had come (pool read with the mint's supply, the trades
+that waited kept, counts migrate_missed_amm and migrate_missed_complete). A completion or migration of a coin whose
+creation is not on record has its creation read from the chain (poolread.creation: the bonding curve's oldest
+transaction, at most CREATE_CALL_S apart) and stored with `late` set, never tapped or handed to the shadow book.
+PumpSwap rows keep the event's base_supply and can_boost. coverage.py reports how complete each day is.
+
 Token transfers (2026-10-29, transfers.py, PYTHIA_PF_TRANSFERS=0 turns it off): every migrated coin's mint is
 watched for 30 minutes on one more connection (`logsSubscribe` mentions <mint>, one subscription per coin), and
 the transactions whose logs show a token transfer and no trade are fetched (`getTransaction`, at most 1.5 a second)
@@ -126,6 +136,9 @@ POOL_RETRY_S = 1.0         # F1: a pool or vault not there yet is read once more
 TAP_MAX_BYTES = 32_000_000  # F2: the tap file is rotated to creates.jsonl.1 past this (about four days)
 EXPECT_KEEP = 200_000      # C1: canonical pools of the coins created or completed, kept for a missed migration
 COMPLETE_WAIT_MS = 20_000  # C1: a completed curve with no migration on the stream after this: its pool is read
+CREATED_KEEP = 300_000     # C1: mints whose creation row the record has (about ten days of creations)
+CREATE_QUEUE = 200         # C1: lost creations waiting for their read (more are dropped, and counted)
+CREATE_CALL_S = 0.5        # C1: at least this between two calls of the creation read (2 a second, on its own RPC)
 
 
 def now_ms() -> int:
@@ -443,6 +456,54 @@ class Collector:
         self.backfill = False                             # C1, the lab's collector only (run sets it; never live)
         self.expect: collections.OrderedDict[str, tuple[str, int]] = collections.OrderedDict()
         self.complete_wait: collections.OrderedDict[str, int] = collections.OrderedDict()
+        self.created: collections.OrderedDict[str, None] = collections.OrderedDict()
+        self.create_q: asyncio.Queue | None = None
+
+    def seen_create(self, mint: str) -> bool:
+        """Whether the record has the coin's creation (or its read is asked for); remembers it either way."""
+        had = mint in self.created
+        self.created[mint] = None
+        if len(self.created) > CREATED_KEEP:
+            self.created.popitem(last=False)
+        return had
+
+    def want_create(self, mint: str, curve: str | None) -> None:
+        """A completion or migration of a coin whose creation the record lacks: read it from the chain."""
+        if self.seen_create(mint) or self.create_q is None or self.loop is None or not curve:
+            return
+        try:
+            self.loop.call_soon_threadsafe(self.create_q.put_nowait, (mint, curve))
+            self.counts["create_missed"] += 1
+        except (RuntimeError, asyncio.QueueFull):
+            self.counts["create_read_dropped"] += 1
+
+    async def create_worker(self, read=None) -> None:
+        """Reads each lost creation (poolread.creation) and stores its row. Only stored: neither the tap (the live
+        service) nor the shadow book gets it, its time is in the past."""
+        from . import poolread
+        if read is None:
+            url, last = poolread.rpc_url(), [0.0]
+
+            def call(method, params):
+                time.sleep(max(0.0, last[0] + CREATE_CALL_S - time.monotonic()))
+                last[0] = time.monotonic()
+                return poolread.post(url, method, params, timeout=10.0)
+            read = lambda mint, curve: poolread.creation(mint, curve, call)     # noqa: E731
+        while True:
+            mint, curve = await self.create_q.get()
+            try:
+                row = await asyncio.to_thread(read, mint, curve)
+            except Exception as e:
+                self.counts["create_read_error"] += 1
+                if self.counts["create_read_error"] <= 5:
+                    print(f"collector: creation of {mint[:8]} not read ({type(e).__name__}: {e})"[:200], flush=True)
+                continue
+            if row is None:
+                self.counts["create_read_empty"] += 1
+                continue
+            self.counts["create_read"] += 1
+            if self.writer is not None:
+                self.writer.add("creates", row)
 
     # ------------------------------------------------------------ C1: migrations the stream lost
     def expect_pool(self, mint: str, ms: int) -> None:
@@ -584,6 +645,8 @@ class Collector:
                     continue
                 row["mint"] = hit[0]
             elif table == "other" and row["kind"] == "migrate":
+                if self.backfill:
+                    self.want_create(row["mint"], ev.get("bonding_curve"))
                 if row["pool"] in self.pools:               # C1 adopted it already: its late migration row only
                     kept += self.keep(table, row, ct)
                     continue
@@ -606,7 +669,10 @@ class Collector:
             if table == "creates" and self.meta:
                 self.queue_meta(row)
             if self.backfill and (table == "creates" or (table == "other" and row["kind"] == "complete")):
-                if table == "other":                        # its migration should follow within seconds
+                if table == "creates":
+                    self.seen_create(row["mint"])
+                else:                                       # its migration should follow within seconds
+                    self.want_create(row["mint"], ev.get("bonding_curve"))
                     self.complete_wait[row["mint"]] = recv_ms
                     while len(self.complete_wait) > POOL_QUEUE:
                         self.complete_wait.popitem(last=False)
@@ -815,6 +881,13 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     if writer is not None and os.environ.get("PYTHIA_PF_TAP", "1") != "0":
         col.tap = Tap()
     col.backfill = writer is not None                     # C1: never in the live service's collector
+    if col.backfill:                                      # the creations of the last two days are on record
+        try:
+            for m in store.read("creates", [store.day_of(now_ms() - 86_400_000), store.day_of(now_ms())],
+                                cols=["mint"])["mint"].drop_nulls().to_list():
+                col.seen_create(m)
+        except Exception as e:                            # an unreadable part: those coins may be read once more
+            print(f"collector: creations on record not read ({type(e).__name__})", flush=True)
     if TR.enabled():
         col.xfer = TR.TransferWatch(col.keep, col.counts)
         col.xfer.on_tx = col.handle_tx                    # its PumpSwap trades fill the program links' gaps
@@ -851,6 +924,8 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     pool_read = amm and not dry_run and poolread.enabled()
     if pool_read:
         col.loop, col.pool_q = loop, asyncio.Queue(maxsize=POOL_QUEUE)
+    if col.backfill and poolread.enabled():
+        col.loop, col.create_q = loop, asyncio.Queue(maxsize=CREATE_QUEUE)
     t_end = time.monotonic() + seconds if seconds else None
     last_hb = last_prune = 0.0
     async with aiohttp.ClientSession() as session:
@@ -860,6 +935,8 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
         if pool_read:
             tasks.append(asyncio.create_task(col.pool_worker(
                 lambda mint, pool: poolread.read(mint, pool, with_supply=True))))
+        if col.create_q is not None:
+            tasks.append(asyncio.create_task(col.create_worker()))
         if grpc_url:
             if geyser.available():
                 for j, p in enumerate(programs):

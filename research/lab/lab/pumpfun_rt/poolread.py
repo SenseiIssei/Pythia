@@ -109,3 +109,51 @@ def read(mint: str, pool: str, call=None, clock=None, with_supply: bool = False)
     if with_supply:
         row["base_supply"], row["can_boost"] = supply(got[2]), vq > 0
     return row
+
+
+# ---------------------------------------------------------------- C1: a creation the stream lost
+
+SIG_PAGE = 1000                        # getSignaturesForAddress's most per call
+SIG_PAGES = 10                         # a curve with more than 10,000 transactions is left without its creation
+
+
+def first_signature(call, address: str, pages: int = SIG_PAGES) -> str | None:
+    """The oldest signature of an address (newest first, paged back with `before`), None past `pages` pages."""
+    before = None
+    for _ in range(pages):
+        opts = {"limit": SIG_PAGE, "commitment": "confirmed", **({"before": before} if before else {})}
+        d = call("getSignaturesForAddress", [address, opts])
+        if d.get("error"):
+            raise RuntimeError(str(d["error"])[:200])
+        res = d.get("result") or []
+        if not res:
+            return before
+        before = res[-1].get("signature")
+        if len(res) < SIG_PAGE:
+            return before
+    return None
+
+
+def creation(mint: str, curve: str, call=None, clock=None) -> dict | None:
+    """C1: the creates row of a coin whose creation the stream lost, from the oldest transaction of its bonding
+    curve: its CreateEvent as the collector keeps it, t the block time (ms), "late" the time it was read (ms).
+    None when that transaction holds no creation of this mint."""
+    from . import events as E
+    url = rpc_url()
+    call = call or (lambda method, params: post(url, method, params))
+    sig = first_signature(call, curve)
+    if not sig:
+        return None
+    d = call("getTransaction", [sig, {"encoding": "json", "commitment": "confirmed",
+                                      "maxSupportedTransactionVersion": 0}])
+    if d.get("error"):
+        raise RuntimeError(str(d["error"])[:200])
+    tx = d.get("result") or {}
+    logs = (tx.get("meta") or {}).get("logMessages") or []
+    late = int(clock() if clock else time.time() * 1000)
+    for name, ev in E.events_of(logs):
+        if name == "CreateEvent" and ev.get("mint") == mint:
+            bt = tx.get("blockTime") or ev.get("timestamp")
+            _, row = E.compact(name, ev, int(bt) * 1000 if bt else late, int(tx.get("slot") or 0), None, sig)
+            return {**row, "late": late}
+    return None

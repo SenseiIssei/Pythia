@@ -191,3 +191,72 @@ def test_the_check_turns_red_under_the_threshold_and_when_stale():
     assert CV.check(res(0, 10, day="2026-10-30"), T0)[0], "a day before C1 is reported, not judged"
     assert CV.check(res(0, 0), T0)[0], "a day without live mints is no alarm"
     assert not CV.check(res(10, 10), T0 + (CV.STALE_H + 1) * 3_600_000)[0]
+
+
+# ---------------------------------------------------------------- a creation the stream lost
+
+def sig_rpc(pages: list[list[str]], logs: list[str], slot: int = 900, block_time: int = 1_792_449_990):
+    calls = []
+
+    def call(method, params):
+        calls.append((method, params))
+        if method == "getSignaturesForAddress":
+            k = sum(1 for m, _ in calls if m == method) - 1
+            return {"result": [{"signature": s} for s in pages[k]] if k < len(pages) else []}
+        assert method == "getTransaction"
+        return {"result": {"slot": slot, "blockTime": block_time, "meta": {"logMessages": logs}}}
+    return call, calls
+
+
+def test_the_creation_is_read_from_the_curves_oldest_transaction(monkeypatch):
+    monkeypatch.setattr(PR, "SIG_PAGE", 3)
+    logs = logs_for((E.PUMP, "CreateEvent", create_vals(mint=B)))
+    call, calls = sig_rpc([["s9", "s8", "s7"], ["s6", "s5"]], logs)
+    row = PR.creation(B, key(4), call=call, clock=lambda: T0 + 99)
+    assert row["mint"] == B and row["sig"] == "s5" and row["t"] == 1_792_449_990_000 and row["late"] == T0 + 99
+    assert row["slot"] == 900 and row["tx"] is None and set(row) <= {f.name for f in store.SCHEMAS["creates"]}
+    assert calls[1][1][1]["before"] == "s7" and calls[2] == ("getTransaction", calls[2][1])
+    assert PR.creation(A, key(4), call=sig_rpc([["s1"]], logs)[0]) is None, "another coin's creation is not taken"
+    assert PR.first_signature(sig_rpc([["a", "b", "c"]] * 20, [])[0], key(4), pages=2) is None, "too many: given up"
+    assert PR.first_signature(sig_rpc([["a", "b", "c"]], [])[0], key(4)) == "c", "exactly a page: the next is empty"
+
+
+def test_a_lost_creation_is_read_once_stored_and_never_tapped(tmp_path):
+    import asyncio
+    rows, tapped = [], []
+    w = store.Writer(tmp_path)
+    col = CL.Collector(w, lambda table, row: rows.append(table), amm=True, meta=False)
+    col.backfill = True
+    col.tap = type("T", (), {"add": lambda self, r: tapped.append(r)})()
+    reads = []
+
+    def read(mint, curve):
+        reads.append((mint, curve))
+        return {"t": T0 - 60_000, "slot": 1, "mint": mint, "bc": curve, "late": T0 + 5}
+
+    async def go():
+        col.loop, col.create_q = asyncio.get_running_loop(), asyncio.Queue(maxsize=CL.CREATE_QUEUE)
+        worker = asyncio.create_task(col.create_worker(read))
+        col.handle(note("cA", 100, logs_for((E.PUMP, "CreateEvent", create_vals(mint=A)))), T0)
+        col.handle(note("mA", 101, logs_for((E.PUMP, "CompletePumpAmmMigrationEvent", mig(A)))), T0 + 1)
+        col.handle(note("kB", 102, logs_for((E.PUMP, "CompleteEvent", {"user": DEV, "mint": B,
+                                                                       "bonding_curve": key(5), "timestamp": 1}))), T0)
+        col.handle(note("mB", 103, logs_for((E.PUMP, "CompletePumpAmmMigrationEvent", mig(B)))), T0 + 2)
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if col.counts["create_read"]:
+                break
+        worker.cancel()
+    asyncio.run(go())
+    assert reads == [(B, key(5))], "A's creation is on record; B's is read once, not again at its migration"
+    w.flush(T0)
+    cr = store.read("creates", [DAY], tmp_path).sort("t")
+    assert cr["mint"].to_list() == [B, A] and cr["late"].to_list() == [T0 + 5, None]
+    assert [r["mint"] for r in tapped] == [A] and rows.count("creates") == 1
+    assert col.counts["create_missed"] == 1
+
+
+def test_the_live_service_collector_does_none_of_it():
+    from lab.pumpfun_rt.live_service import LiveCollector
+    col = LiveCollector(None, None, amm=True, meta=False)
+    assert col.backfill is False and col.create_q is None

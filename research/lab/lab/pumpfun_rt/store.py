@@ -12,7 +12,9 @@ Tables:
   creates  one row per token created: time (ms, as received), slot, tx (the collector's
            running transaction number), signature, mint, bonding curve, creator, name,
            symbol, metadata uri, the curve's starting reserves, mayhem and cashback flags,
-           the quote mint when it is not SOL, the creator fee
+           the quote mint when it is not SOL, the creator fee; since C1 (2026-11-02) a
+           creation the stream lost is read from the chain at the coin's completion or
+           migration: t is then its block time and `late` the ms it was read (null otherwise)
   trades   every bonding curve trade: time, slot, tx, mint, side, SOL and token amounts,
            trader, the curve's virtual and real reserves after the trade, the protocol
            and creator fee in basis points, the instruction name
@@ -71,7 +73,9 @@ SCHEMAS: dict[str, pa.Schema] = {
     "creates": pa.schema([("t", I64), ("slot", I64), ("tx", I64), ("sig", STR), ("mint", STR), ("bc", STR),
                           ("user", STR), ("creator", STR), ("name", STR), ("symbol", STR), ("uri", STR),
                           ("vt", I64), ("vs", I64), ("rt", I64), ("supply", I64), ("mayhem", BOOL),
-                          ("cashback", BOOL), ("quote", STR), ("cfb", I32), ("bts", I64)]),
+                          ("cashback", BOOL), ("quote", STR), ("cfb", I32), ("bts", I64),
+                          # C1: a creation the stream lost, read from the chain at this ms (t is then block time)
+                          ("late", I64)]),
     "trades": pa.schema([("t", I64), ("slot", I64), ("tx", I64), ("mint", STR), ("buy", BOOL), ("sol", I64),
                          ("tok", I64), ("user", STR), ("vs", I64), ("vt", I64), ("rs", I64), ("rt", I64),
                          ("fb", I32), ("cfb", I32), ("ix", STR), ("quote", STR), ("bts", I64)]),
