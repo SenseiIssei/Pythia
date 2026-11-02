@@ -90,3 +90,10 @@ way (`pumpfun:r7b:<book>`). The simulation makes no number on real data and is n
 `results/dsr_bar_r7b.md`: the measured F3 shapes, the simulation table (false pass old and new per shape, mean N_eff
 against the true genome count, mean SR0), the power, old against new (V, N, SR0, DSR all / pumpfun) per candidate, and
 the days still needed at each rule's current mean per entry under the new bar.
+
+## Amendment (2026-11-02, after a 10-family trial run of the simulation code, before its full run and before any number on a real candidate)
+
+In the trial run the clustering merged independent trials: a trial with fewer entries than days has P&L on its first
+days only, so two such trials share the same pattern of zeros and correlate near 1. Clustered now are only trials with
+at least `MIN_ENTRIES` (20) entries and at least `EFF_MIN_DAYS` (5) days with P&L; every other trial with entries is
+its own cluster. This counts more trials, so the bar can only rise against the text above. Nothing else changes.
