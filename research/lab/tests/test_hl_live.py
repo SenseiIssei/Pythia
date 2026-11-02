@@ -285,6 +285,14 @@ def test_gate_go_flat(tmp_path):
     refused(tmp_path, "flat:", flat=True)
 
 
+def test_gate_go_flat_in_the_live_folder_leaves_the_paper_book(tmp_path):
+    kw, sent, cards, folder = armed(tmp_path, live={})
+    (folder / "live" / hx.FLAT_FILE).write_text("")
+    res = hl.send(**kw)
+    assert not res["sent"] and not sent and any("flat:" in w for w in res["why"])
+    assert not hx.flat_switch(folder)                                        # the paper book keeps trading
+
+
 def test_an_unread_account_is_a_refusal(tmp_path):
     kw, sent, cards, folder = armed(tmp_path)
 

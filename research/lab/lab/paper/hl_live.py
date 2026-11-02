@@ -19,7 +19,8 @@ owner says yes (after at least 30 days of forward record, with an API wallet he 
                     gross    held and target gross at most MAX_GROSS (2x) of the account value
                     stop     the account above STOP_DRAWDOWN (-20 %) of the value at its first armed send; once
                              hit, stopped for good (live/state.json, only the owner clears it)
-                    flat     no GO_FLAT in the book's folder (the owner closes in Hyperliquid's app)
+                    flat     no GO_FLAT in the book's folder (flat on paper too) nor in its live/ folder (the live
+                             account only); the owner closes the positions in Hyperliquid's app
                   then hl_dryrun.plan on the live positions (its own limits again), the orders signed and posted
                   to the exchange endpoint. The key is read only there, after every gate, and never printed.
 
@@ -483,7 +484,7 @@ def send(folder: Path = BOOK_DIR, env_file: Path = ENV_FILE, ack_file: Path = AC
             why.append(f"account: {type(e).__name__}: {e}")
     tgt = book_targets(book, acc["value"]) if acc else {}
     tgross = sum(abs(u) * mids.get(c, float("inf")) for c, u in tgt.items())
-    flat = hx.flat_switch(folder)
+    flat = hx.flat_switch(folder) or hx.flat_switch(folder / "live")      # the book's switch, or the live one only
     why += gates(env, ack_problem(ack_file, now_ms), acc, tgross, live, flat)
     if acc and not why:
         start = float(live.get("start_usd") or acc["value"])
