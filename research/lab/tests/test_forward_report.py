@@ -354,3 +354,43 @@ def test_autopilots_carry_gated_btc_and_the_evidence_file_carries_the_calendar(r
     # Without closes: no calendar, n/a, nothing guessed.
     data = fr.build(now_ms=now, url=f.as_uri(), price_at=lambda ms: 100.0, root=tmp_path)
     assert data["btc_gate"] is None and data["autopilots"][0]["btc_gated_return_pct"] is None
+
+
+# ---------------------------------------------------------------- M4L: the M4 paper books' bands
+
+def test_export_backtests_writes_m4_hl_small_and_m4_perps_from_m4hs_series(reports, tmp_path, monkeypatch, capsys):
+    import polars as pl
+
+    from lab.experiments import fam_common, m4h
+    monkeypatch.setattr(fam_common, "OUT", tmp_path / "sweep")              # the other books find nothing here
+    monkeypatch.delenv("PYTHIA_AGENT_OUT", raising=False)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setenv("PYTHIA_CACHE", str(cache))
+    rng = np.random.default_rng(5)
+    day0 = 1_704_067_200_000_000                                             # 2024-01-01
+    for book, mu in (("m4_hl_small", 0.0015), ("m4_perps", 0.001)):
+        pl.DataFrame({"day": day0 + np.arange(900, dtype=np.int64) * 86_400_000_000,
+                      "ret": rng.normal(mu, 0.012, 900)}).write_parquet(cache / m4h.SERIES[book]["file"])
+    monkeypatch.setattr(m4h, "build", lambda log=print: pytest.fail("both series are there: no rebuild"))
+    fr.export_backtests(tmp_path / "source")
+    for book in ("m4_hl_small", "m4_perps"):
+        s = fr.load_series(book)
+        assert s is not None and len(s["returns"]) == 900 and s["first"] == "2024-01-01"
+        assert s["source"] == m4h.SERIES[book]["source"]
+    assert "m4_hl_small and m4_perps skipped" not in capsys.readouterr().err
+
+
+def test_m4_hl_small_gets_a_band_and_a_position(reports):
+    write_series("m4_hl_small", np.random.default_rng(6).normal(0.0015, 0.012, 900))
+    row = fr.book_row("m4_hl_small", journal(reports, "m4_hl_small", [9990.2, 10013.5, 9967.3, 10136.8]))
+    assert row["expected"]["method"] == "bootstrap" and row["position"] == "inside"
+    assert row["expected"]["low_pct"] < row["return_pct"] < row["expected"]["high_pct"]
+
+
+def test_m4_perps_gets_a_band_and_a_position(reports):
+    write_series("m4_perps", np.random.default_rng(7).normal(0.001, 0.012, 900))
+    eq = [10000.0 * (1.005 ** i) for i in range(13)]
+    row = fr.book_row("m4_perps", journal(reports, "m4_perps", eq))
+    assert row["expected"]["method"] == "bootstrap" and row["position"] in ("inside", "above")
+    assert row["status"] != "unknown"

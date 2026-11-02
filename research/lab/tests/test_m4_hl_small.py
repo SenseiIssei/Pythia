@@ -181,6 +181,36 @@ def test_fill_charges_taker_and_half_the_impact_spread():
     assert units == {}
 
 
+BOOK = [[{"px": "59997", "sz": "0.0001"}, {"px": "59985", "sz": "1"}],          # bids
+        [{"px": "60003", "sz": "0.0001"}, {"px": "60012", "sz": "1"}]]          # asks
+
+
+def test_fill_walks_the_l2_book_at_the_orders_size():
+    ctx = hs.parse_ctxs(CTXS)
+    p = hx.plan({}, {"BTC": 0.0002}, {"BTC": 60_000.0}, {"BTC": 5}, 230.0, 230.0)
+    units, cost, traded = hs.fill({}, p["orders"], ctx, {"BTC": BOOK})
+    # 0.0001 at 60003 and 0.0001 at 60012: 60007.5 on average, 1.25 bps above the mid (the impact spread says 1 bp)
+    assert traded == pytest.approx(12.0) and cost == pytest.approx(12.0 * (hs.TAKER + 7.5 / 60_000))
+    assert p["orders"][0]["slip_from"] == "book" and p["orders"][0]["slip_bps"] == pytest.approx(1.25)
+    assert hs.walk(BOOK, False, 0.0002, 60_000.0) == pytest.approx(9.0 / 60_000)       # a sell walks the bids
+    assert hs.walk(BOOK, True, 2.0, 60_000.0) is None                                  # deeper than the book
+    assert hs.walk(BOOK, True, 0.0001, 60_010.0) == 0.0                                 # never below zero
+    o = [{"coin": "BTC", "side": "buy", "size": "0.0002"}]
+    hs.fill({}, o, ctx, {"BTC": None})
+    assert o[0]["slip_from"] == "impact" and o[0]["slip_bps"] == pytest.approx(1.0)
+
+
+def test_l2_book_reads_the_levels_and_fails_soft():
+    assert hs.l2_book("BTC", fetch=lambda b: {"coin": "BTC", "levels": BOOK}) == BOOK
+    assert hs.l2_book("BTC", fetch=lambda b: {"error": "x"}) is None
+
+
+def test_the_model_cost_is_the_judged_cells():
+    # M4L: the judged cell's taker plus its mean slippage per USD traded, not taker plus 1 bp
+    assert hs.MODEL_SLIP is not None and 2e-4 < hs.MODEL_SLIP < 10e-4
+    assert "TAKER + MODEL_SLIP" in inspect.getsource(hs.main)
+
+
 def test_funding_since_sums_the_window_and_falls_back():
     rows = [{"coin": "BTC", "fundingRate": "0.00001", "time": t} for t in (1000, 2000, 3000)]
     assert hs.funding_since("BTC", 1000, 3000, fetch=lambda body: rows) == pytest.approx(0.00002)

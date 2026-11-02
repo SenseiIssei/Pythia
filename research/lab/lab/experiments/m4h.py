@@ -5,6 +5,7 @@ Pre-registered in results/m4h_prereg.md; its first run stopped at the signal che
 
     PYTHIA_CACHE=<xs_daily panel cache> PYTHIA_AGENT_OUT=<cache> PYTHIA_TRIALS_REGISTRY=<registry> \
         PYTHIA_REPORTS=<reports> flock <heavy lock> python -m lab.experiments.m4h [--no-register] [--report]
+    ... python -m lab.experiments.m4h --export-series [--no-register]   M4L: the paper books' backtest series
 
 reg7n unchanged (T6b's walk-forward refit on xs_daily's panel cut at 2026-06-30, the 2026-10-07 score cache being
 gone), the 100 most liquid perps of each day as xs_daily.book_buffer takes them and, out of sample, only the ones
@@ -571,6 +572,79 @@ def summary(r: dict, days: np.ndarray, cap: float | None) -> dict:
             "sharpe_no_funding": ann_sharpe(x + r["fund"]), "dead": r["dead"]}
 
 
+# ---------------------------------------------------------------- M4L: the paper books' backtest series
+
+# results/m4l_prereg.md: the out-of-sample daily net returns the forward report draws each book's band from.
+# m4_hl_small: M4H's judged cell as registered; m4_perps: reg7n 10/10, the ideal account (an index book without a
+# minimum), on the coins Kraken Futures lists from the day after their openingDate (DT1's kf_listings, today's list
+# only), Kraken's base taker plus the same proxy, Binance's funding (the paper book books Binance's).
+SERIES = {
+    "m4_hl_small": {"file": "m4h_judged.parquet", "id": "small:m4l:hl_judged_rebuild", "capital": ACCOUNTS["230usd"],
+                    "fee": FEE["taker"], "venue": "hyperliquid",
+                    "source": "M4H judged cell rebuilt (230 USD, k 10, 1x, taker, Hyperliquid's coins and funding)"},
+    "m4_perps": {"file": "m4_perps_kraken.parquet", "id": "small:m4l:m4_perps_kraken", "capital": None,
+                 "fee": dt.FEE_KF, "venue": "kraken_futures",
+                 "source": "reg7n 10/10 on Kraken Futures' coins (5 bps taker plus DT1's proxy, Binance funding)"},
+}
+SERIES_PREREG = "results/m4l_prereg.md"
+
+
+def series_dir() -> Path:
+    """Where the series live: $PYTHIA_CACHE, default <data>/lab-cache (the paper jobs' cache)."""
+    return Path(os.environ.get("PYTHIA_CACHE", str(labdata.ROOT / "lab-cache")))
+
+
+def export_series(X: dict, out: Path | None = None, kf: dict[str, int] | None = None, register: bool = True,
+                  windows: tuple[tuple[int, int], tuple[int, int]] | None = None, log=print) -> dict:
+    """Both books' series from M4H's matrices: in sample (Binance universe and funding) first, the two trials
+    registered with their in-sample Sharpes, then out of sample to <out>/<file> (day, ret: the decision day and
+    the next day's net return). Returns {book: summary} (also <out>/m4l_series.json)."""
+    out = out or series_dir()
+    days = X["days"]
+    (i0, i1), (o0, o1) = windows or (window_rows(days, IS_FROM, IS_TO), window_rows(days, OOS_FROM, OOS_TO))
+    kf = dt.kf_listings() if kf is None else kf
+    listed = {"hyperliquid": X["listed"],
+              "kraken_futures": listed_matrix(days, X["perp"], {s: (f, None) for s, f in kf.items()})}
+    nan = np.full(X["R"].shape, np.nan)
+    X["F"], X["F2"] = nan, nan
+    IS = {b: simulate(X, i0, i1, 10, 1, c["capital"], c["fee"], "base", None) for b, c in SERIES.items()}
+    T = [{"id": c["id"], "family": "small", "source": SERIES_PREREG, "sharpe": ann_sharpe(IS[b]["ret"])}
+         for b, c in SERIES.items()]
+    if register:
+        metrics.register(T)
+    pool = metrics.trial_pool(None, extra=T)
+    log(f"{len(T)} trials registered; pool {pool['n_trials']}")
+    res = {}
+    for b, c in SERIES.items():
+        X["F"] = X["F_hl"] if c["venue"] == "hyperliquid" else nan
+        r = simulate(X, o0, o1, 10, 1, c["capital"], c["fee"], "base", listed[c["venue"]])
+        x = r["ret"]
+        traded = r["fees"] / c["fee"] if c["fee"] else 0.0
+        out.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"day": days[o0:o1 + 1].astype(np.int64), "ret": x}).write_parquet(out / c["file"])
+        res[b] = {"file": c["file"], "source": c["source"], "trial": c["id"], "is_sharpe": ann_sharpe(IS[b]["ret"]),
+                  "sharpe": ann_sharpe(x), "cagr": cagr(x), "max_dd": max_dd(x), "dsr": metrics.dsr(x, pool),
+                  "days": int(len(x)), "first": dc.day_str(int(days[o0])), "last": dc.day_str(int(days[o1])),
+                  "turnover_day": traded / r["eq_days"] if r["eq_days"] else 0.0,
+                  "fee_bps": c["fee"] * 1e4, "slip_bps": r["slip"] / traded * 1e4 if traded else 0.0,
+                  "listed_mean": float((listed[c["venue"]][o0:o1 + 1] & X["inset"][o0:o1 + 1]).sum(1).mean())
+                  if "inset" in X else None}
+        log(f"{b}: Sharpe {res[b]['sharpe']:.2f}, {res[b]['days']} days to {out / c['file']}")
+    X["F"], X["F2"] = nan, nan
+    (out / "m4l_series.json").write_text(json.dumps({"generated": datetime.now(timezone.utc).isoformat(
+        timespec="seconds"), "pool": pool["n_trials"], "books": res}, indent=1, default=float), encoding="utf-8")
+    return res
+
+
+def series(out: Path | None = None, build_missing: bool = True, log=print) -> dict[str, pl.DataFrame]:
+    """{book: (day, ret)} of the exported series; rebuilt (M4H's matrices and reg7n's refit, heavy: 16 minutes in M4L)
+    when one is missing and build_missing."""
+    out = out or series_dir()
+    if build_missing and not all((out / c["file"]).exists() for c in SERIES.values()):
+        export_series(build(log), out, log=log)
+    return {b: pl.read_parquet(out / c["file"]).sort("day") for b, c in SERIES.items() if (out / c["file"]).exists()}
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     from .. import report
@@ -583,6 +657,9 @@ def main(argv: list[str] | None = None) -> int:
     t_0 = time.time()
     log = lambda s: print(f"[{time.time() - t_0:.0f} s] {s}", flush=True)       # noqa: E731
     X = build(log)
+    if "--export-series" in argv:
+        export_series(X, register=register, log=log)
+        return 0
     days = X["days"]
     X["F"], X["F2"] = np.full(X["R"].shape, np.nan), np.full(X["R"].shape, np.nan)
     i0, i1 = window_rows(days, IS_FROM, IS_TO)

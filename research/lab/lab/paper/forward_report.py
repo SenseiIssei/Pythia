@@ -39,8 +39,10 @@ Where the band comes from, best first:
       write the backtest series from whatever this machine has: the momentum
       books from the history files, the sweep candidates from the sweep's run
       caches, the tranche book re-simulated on the sweep's cached panel, M4
-      from the xs_daily pick cache. --source reads those inputs
-      from DIR instead of PYTHIA_DATA (nothing is written there).
+      from the xs_daily pick cache, m4_hl_small and m4_perps from
+      lab.experiments.m4h's series in the lab cache (M4L; built there when
+      missing, which is heavy). --source reads those inputs from DIR instead
+      of PYTHIA_DATA (nothing is written there but a missing M4L series).
 
 Environment: PYTHIA_AUTOPILOT_STATE_URL (default http://127.0.0.1:8788/api/state;
 "off" skips the engine). The engine being down is reported, not an error.
@@ -951,6 +953,21 @@ def export_backtests(source: Path) -> None:
         _save_series("m4_ls", net, f"xs_daily holdout ({slow})", 1, _day(df["day"][0]), _day(df["day"][-1]))
     except (StopIteration, OSError, KeyError, ValueError, TypeError, ImportError, AttributeError) as e:
         print("m4_ls skipped:", type(e).__name__, e, file=sys.stderr)
+
+    # M4L: M4H's judged cell for m4_hl_small and reg7n on Kraken Futures' coins for m4_perps, lab.experiments.m4h's
+    # export in the lab cache (out of sample 2024-01 to 2026-06), rebuilt there when missing (heavy: the reg7n refit).
+    old = labdata.ROOT
+    labdata.ROOT = source
+    try:
+        from ..experiments import m4h
+        cache = Path(os.environ["PYTHIA_CACHE"]) if "PYTHIA_CACHE" in os.environ else source / "lab-cache"
+        for book, df in m4h.series(cache).items():
+            _save_series(book, df["ret"].to_numpy(), m4h.SERIES[book]["source"], 1, _day(df["day"][0]),
+                         _day(df["day"][-1]))
+    except Exception as e:  # noqa: BLE001 - one missing input must not stop the others
+        print("m4_hl_small and m4_perps skipped:", type(e).__name__, e, file=sys.stderr)
+    finally:
+        labdata.ROOT = old
 
 
 # ---------------------------------------------------------------- evidence for the engine

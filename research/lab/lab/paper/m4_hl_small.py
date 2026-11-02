@@ -21,7 +21,9 @@ Every run (daily, after the nightly backfill):
      equity (the account, at most 250 USD) each;
   5. the target in coin units goes through lab.paper.hl_dryrun (the hard limits: 250 USD, 2x gross, -20 % stop,
      the GO_FLAT switch in this book's folder, the 10 USD minimum, size decimals); its orders are filled on paper
-     at the mid plus Hyperliquid's taker 4.5 bps and half the impact spread, and written to orders/<date>.json.
+     at the mid plus Hyperliquid's taker 4.5 bps and the slippage of walking its public l2Book at the order's size
+     (half the impact spread without a book; M4L), and written to orders/<date>.json. The journal's model cost is
+     what M4H's judged cell paid for the same turnover: the taker plus its mean slippage (MODEL_SLIP).
 
 The journal's `equity` is the account as an index on 10,000 (the forward report's scale); `equity_usd` is the 230
 USD account. The run fills at its run time (about 06:00 UTC), not at 01:00 as the study did; `entry_hour_utc` says.
@@ -60,6 +62,7 @@ START_USD = 230.0
 INDEX = 10_000.0                # the journal's equity scale, as every paper book's
 TAKER = 4.5e-4                  # Hyperliquid's base taker
 SLIP_CAP = 50e-4
+MODEL_SLIP = 4.4e-4            # M4H's judged cell rebuilt (M4L): 4.37 bps of DT1's proxy per USD traded
 DAY_US = xs.DAY_US
 HOUR_MS = 3_600_000
 DIR = WRITE_ROOT / "paper" / NAME
@@ -167,16 +170,52 @@ def target_units(tgt: dict[str, float], perp_coin: dict[str, str], ctx: dict, eq
     return out
 
 
-def fill(units: dict[str, float], orders: list[dict], ctx: dict) -> tuple[dict[str, float], float, float]:
-    """The orders filled on paper at the mid: (positions, cost in USD (taker plus half the impact spread),
-    traded notional)."""
+def l2_book(coin: str, fetch=post) -> list | None:
+    """Hyperliquid's public l2Book of a coin, [bids, asks] of {px, sz} best first; None when the call fails."""
+    try:
+        lv = fetch({"type": "l2Book", "coin": coin})["levels"]
+        return lv if isinstance(lv, list) and len(lv) == 2 else None
+    except Exception:  # noqa: BLE001 - the impact spread stands in
+        return None
+
+
+def walk(levels: list | None, buy: bool, size: float, mid: float) -> float | None:
+    """What `size` units cost walking the book from the best level, as a share of their notional at the mid (the
+    price paid above it for a buy, below it for a sell); None without a book deep enough or a sane price."""
+    if not levels or not size > 0 or not mid > 0:
+        return None
+    left, paid = size, 0.0
+    for lv in levels[1 if buy else 0]:
+        try:
+            px, sz = float(lv["px"]), float(lv["sz"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        take = min(left, sz)
+        paid += take * px
+        left -= take
+        if left <= 1e-12:
+            slip = (paid / size - mid) / mid * (1 if buy else -1)
+            return min(max(slip, 0.0), SLIP_CAP)
+    return None
+
+
+def fill(units: dict[str, float], orders: list[dict], ctx: dict, books: dict | None = None
+         ) -> tuple[dict[str, float], float, float]:
+    """The orders filled on paper at the mid: (positions, cost in USD (taker plus the slippage), traded notional).
+    The slippage walks the coin's l2Book (books: coin -> levels) at the order's size; without a book deep enough it
+    is half the impact spread (impactPxs, at Hyperliquid's impact notional: dearer than an 11.5 USD order). Each
+    order gets `slip_bps` and `slip_from` (book or impact) for orders/<date>.json."""
     units = dict(units)
     cost = traded = 0.0
     for o in orders:
         q = float(o["size"]) * (1 if o["side"] == "buy" else -1)
         c = o["coin"]
         n = abs(q) * ctx[c]["mid"]
-        cost += n * (TAKER + ctx[c]["half_spread"])
+        slip = walk((books or {}).get(c), q > 0, abs(q), ctx[c]["mid"])
+        o["slip_from"] = "impact" if slip is None else "book"
+        slip = ctx[c]["half_spread"] if slip is None else slip
+        o["slip_bps"] = round(slip * 1e4, 2)
+        cost += n * (TAKER + slip)
         traded += n
         u = units.get(c, 0.0) + q
         units[c] = u
@@ -250,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     want = target_units(tgt, perp_coin, ctx, equity)
     plan = hx.plan(units, want, {k: v["mid"] for k, v in ctx.items()}, {k: v["dec"] for k, v in ctx.items()},
                    equity, float(st["start_usd"]), flat=hx.flat_switch(DIR), stopped=bool(st.get("stopped")))
-    held, cost, traded = fill(units, plan["orders"], ctx)
+    held, cost, traded = fill(units, plan["orders"], ctx, {o["coin"]: l2_book(o["coin"]) for o in plan["orders"]})
     equity -= cost
     gross_held = sum(u * ctx[c]["mid"] for c, u in held.items())
     long_x = sum(u * ctx[c]["mid"] for c, u in held.items() if u > 0) / equity if equity > 0 else 0.0
@@ -264,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         "gross_ret_pct": round(pnl / start_eq * 100, 4) if start_eq else 0.0,
         "funding_pct": round(-funding / start_eq * 100, 4) if start_eq else 0.0,
         "paper_cost_bps": round(cost / start_eq * 1e4, 2) if start_eq else 0.0,
-        "model_cost_bps": round(traded / start_eq * (TAKER + 1e-4) * 1e4, 2) if start_eq else 0.0,
+        "model_cost_bps": round(traded / start_eq * (TAKER + MODEL_SLIP) * 1e4, 2) if start_eq else 0.0,
         "turnover": round(traded / start_eq, 4) if start_eq else 0.0,
         "long_exposure": round(long_x, 4),
         "short_exposure": round(short_x, 4),

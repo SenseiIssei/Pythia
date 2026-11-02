@@ -7,6 +7,7 @@ Run from research/lab:  python -m pytest tests/test_m4h.py
 
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
@@ -302,3 +303,49 @@ def test_judge_cell_and_the_reason():
     assert m4h.reason(by)[10] == "no edge"
     by[m4h.cell_key("ideal", 10, 1, "base", "taker")] = row(False, {**ok, "drawdown under 25 %": False})
     assert m4h.reason(by)[10] == "drawdown (the ideal account's too)"
+
+
+# ---------------------------------------------------------------- M4L: the paper books' series
+
+def test_export_series_writes_both_books_after_registering_their_trials(tmp_path, monkeypatch):
+    reg = tmp_path / "registry.jsonl"
+    monkeypatch.setenv("PYTHIA_TRIALS_REGISTRY", str(reg))
+    X = world(T=6, r=0.0)
+    X["R"][:, :10] = 0.01                                                    # the longs gain 1 % a day
+    X["R2"] = X["R"].copy()
+    X["slip"][:] = 2e-4
+    X["perp"] = [f"C{j}USDT" for j in range(30)]
+    X["listed"] = np.ones((6, 30), dtype=bool)
+    X["listed"][:, 0] = False                                               # Hyperliquid lacks the best coin
+    X["F_hl"], X["F2_hl"] = np.zeros((6, 30)), np.zeros((6, 30))
+    X["P"][:] = 2.0
+    X["dec"] = [2] * 30
+    kf = {f"C{j}USDT": int(D0 // DAY) for j in range(1, 30)}               # Kraken lists all but C0 from day 0
+    res = m4h.export_series(X, tmp_path, kf=kf, windows=((0, 1), (2, 5)), log=lambda s: None)
+    ids = [json.loads(x)["id"] for x in reg.read_text().splitlines()]
+    assert m4h.SERIES["m4_hl_small"]["id"] in ids and m4h.SERIES["m4_perps"]["id"] in ids
+    for book in ("m4_hl_small", "m4_perps"):
+        df = pl.read_parquet(tmp_path / m4h.SERIES[book]["file"])
+        assert df.columns == ["day", "ret"] and df.height == 4 and df["day"][0] == D0 + 2 * DAY
+        assert res[book]["days"] == 4 and res[book]["trial"] == m4h.SERIES[book]["id"]
+    hl = pl.read_parquet(tmp_path / m4h.SERIES["m4_hl_small"]["file"])["ret"].to_numpy()
+    kr = pl.read_parquet(tmp_path / m4h.SERIES["m4_perps"]["file"])["ret"].to_numpy()
+    assert res["m4_perps"]["fee_bps"] == pytest.approx(5.0) and res["m4_hl_small"]["fee_bps"] == pytest.approx(4.5)
+    assert res["m4_perps"]["slip_bps"] == pytest.approx(2.0)
+    assert kr[0] < kr[1] and hl[1] > 0                                       # costs on the entry day only
+    assert json.loads((tmp_path / "m4l_series.json").read_text())["books"]["m4_perps"]["days"] == 4
+
+
+def test_series_rebuilds_when_a_file_is_missing(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(m4h, "build", lambda log=print: calls.append("build") or {"x": 1})
+
+    def fake_export(X, out, log=print):
+        for c in m4h.SERIES.values():
+            pl.DataFrame({"day": [D0, D0 + DAY], "ret": [0.01, -0.01]}).write_parquet(out / c["file"])
+    monkeypatch.setattr(m4h, "export_series", fake_export)
+    s = m4h.series(tmp_path)
+    assert calls == ["build"] and set(s) == {"m4_hl_small", "m4_perps"}
+    m4h.series(tmp_path)
+    assert calls == ["build"]                                                 # both there: nothing rebuilt
+    assert m4h.series(tmp_path / "none", build_missing=False) == {}
