@@ -279,6 +279,15 @@ def test_render_of_the_repo_table_has_every_enabled_scheduled_job():
             assert f"# disabled: {j['schedule']}" in text
 
 
+def test_the_pumpfun_live_dry_run_is_off_while_the_live_bot_is():
+    # 2026-11-03: the live bot is off and its wallet paid out; every dry run failed on the fee and showed red
+    t = jobs.load_table(REPO_TABLE)
+    j = t.jobs["pumpfun-live-simulate"]
+    assert not j["enabled"] and j["command"] == "python -m lab.pumpfun_rt.live_exec simulate"
+    assert "# disabled: " + j["schedule"] in jobs.render_cron(t)
+    assert "pumpfun-live-watch" in t.jobs                     # the bot's own entries are untouched
+
+
 def test_docker_argv(tmp_path):
     (tmp_path / "alerts.env").write_text("")
     t = table(tmp_path, f"""
