@@ -167,7 +167,7 @@ def test_collector_stops_steam_after_429_and_cools_down(tmp_path):
     rep = collect.run(tmp_path, fetch=net, steam_max=5, now_ms=NOW, sleep=lambda s: None)
     # one wait, the second 429 ends Steam for the run; Skinport still collected
     assert steam_calls(net) == 2 and rep["steam_rate_limited"] and rep["steam_ok"] == 0 and rep["steam_cursor"] == 0
-    assert rep["ok"] and rep["steam_failed"]
+    assert rep["ok"] and not rep["steam_failed"]                 # a 429 is not a failure (2026-11-03)
     assert (tmp_path / "cs2" / "daily" / "skinport" / "date=2026-10-15.parquet").exists()
     st = json.loads((tmp_path / "cs2" / "steam_state.json").read_text())
     assert st["cooldown_s"] == 3600 and st["until_ms"] == NOW + H and st["refusals"] == 1
@@ -180,7 +180,7 @@ def test_collector_stops_steam_after_429_and_cools_down(tmp_path):
     # expired: knocks once, refused again, the cool-down doubles
     net, slept = FakeNet(items, sales, steam_429=10), []
     rep3 = collect.run(tmp_path, fetch=net, steam_max=5, now_ms=NOW + H, sleep=slept.append)
-    assert steam_calls(net) == 1 and slept == [] and rep3["steam_failed"]
+    assert steam_calls(net) == 1 and slept == [] and not rep3["steam_failed"]
     st = json.loads((tmp_path / "cs2" / "steam_state.json").read_text())
     assert st["cooldown_s"] == 7200 and st["until_ms"] == NOW + 3 * H and st["refusals"] == 2
     # doubling stops at 12 h
@@ -237,16 +237,20 @@ def test_exit_code_follows_steam(tmp_path, monkeypatch, capsys):
         return real(tmp_path, fetch=nets["net"], now_ms=nets["now"], sleep=lambda s: None, **kw)
 
     monkeypatch.setattr(collect, "run", run)
-    assert collect.main([]) == 1  # Steam asked, refused: red
+    assert not collect.STEAM_SINGLE
+    assert collect.main([]) == 0 and steam_calls(nets["net"]) == 0   # the hourly job: Skinport only, no knock
+    assert (tmp_path / "cs2" / "skinport_items" / "date=2026-10-15" / "1205.parquet").exists()
+    capsys.readouterr()
+    assert collect.main(["--steam"]) == 0  # asked by hand, refused: the refused line, not red
     out = capsys.readouterr().out
     assert "steam refused (429), cooling down until 2026-10-15T13:05Z" in out.splitlines()[0]
-    assert (tmp_path / "cs2" / "skinport_items" / "date=2026-10-15" / "1205.parquet").exists()
+    assert steam_calls(nets["net"]) == 2
     nets.update(net=FakeNet(items, sales), now=NOW + 600_000)
-    assert collect.main([]) == 0  # skipped for the cool-down: the refused line, not red
+    assert collect.main(["--steam"]) == 0  # skipped for the cool-down: the refused line, not red
     assert capsys.readouterr().out.startswith("steam refused (429), cooling down until 2026-10-15T13:05Z\n")
     nets["now"] = NOW + 3_600_000
-    assert collect.main([]) == 0  # Steam answers again
-    assert collect.main(["--no-steam"]) == 0
+    assert collect.main(["--steam"]) == 0  # Steam answers again
+    assert collect.main(["--steam", "--no-steam"]) == 0
 
     # asked, answered 200 but no price in any of them: also red
     def empty(url, headers):
@@ -255,7 +259,7 @@ def test_exit_code_follows_steam(tmp_path, monkeypatch, capsys):
         return FakeNet(items, sales)(url, headers)
 
     nets.update(net=empty, now=NOW + 7_200_000)
-    assert collect.main([]) == 1
+    assert collect.main(["--steam"]) == 1
     assert "steam: 0 of" in capsys.readouterr().out
 
 

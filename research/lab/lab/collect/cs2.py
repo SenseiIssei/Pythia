@@ -5,9 +5,9 @@ Market or any skin marketplace breaks their terms; the owner trades by hand).
 
 Hourly on the lab machine (see research/ops/README.md):
 
-  python -m lab.collect.cs2                 Skinport items + sales history + Steam watchlist
-  python -m lab.collect.cs2 --no-steam      Skinport only
-  python -m lab.collect.cs2 --steam-max 5   fewer Steam requests this run
+  python -m lab.collect.cs2                 Skinport items + sales history (no single Steam prices, below)
+  python -m lab.collect.cs2 --steam         and the Steam watchlist, by hand only
+  python -m lab.collect.cs2 --steam --steam-max 5   fewer Steam requests this run
   python -m lab.collect.cs2 --steam-market  only the daily Steam market snapshot (csgotrader, below);
                                             --force stores it again for a day already stored
 
@@ -30,12 +30,14 @@ Sources, all public and keyless:
             request from the lab with 429 (it filters the client); 320 runs
             ended ok with steam_ok 0. That is left as it is: no other user
             agent, no proxies, nothing that works around the filter.
-            Exit code: 1 when Steam was asked and gave no price (after the
-            Skinport files are written), so the job turns red on the hours
-            Steam is tried and refused; a run that skips Steam for the
-            cool-down prints the refused line and exits 0 when Skinport is
-            fine, so cs2-run (depends_on cs2-collect) keeps the Skinport
-            board and alerts going between the knocks.
+            Off since 2026-11-03 (the owner): Steam refused every request
+            since 2026-10-15, so the hourly job asks only Skinport and the
+            Steam numbers come from the daily aggregated file (--steam-market).
+            --steam asks the watchlist again, by hand.
+            Exit code: a 429 is not a failure (the refused line, the
+            cool-down, exit 0 when Skinport is fine, so cs2-run keeps the
+            Skinport board and alerts going); 1 only when Steam answered and
+            gave no price in any answer (after the Skinport files are written).
   Steam market, aggregated (daily, --steam-market)
             GET https://prices.csgotrader.app/latest/steam.json
             GET https://prices.csgotrader.app/latest/exchange_rates.json
@@ -94,6 +96,7 @@ STEAM_INTERVAL_S = 3.2       # 60 / 3.2 = 18.75 requests a minute, under Steam's
 STEAM_MAX_PER_RUN = 15       # a small batch an hour; the cursor rotates through the watchlist
 STEAM_BACKOFF_S = (60,)      # wait after the first 429; the second stops the run
 STEAM_COOLDOWN_S = (3_600, 43_200)  # a refused run skips Steam for 1 h, doubling up to 12 h
+STEAM_SINGLE = False         # the hourly job asks no single Steam prices (429 since 2026-10-15); --steam by hand
 TOP_LIQUID = 40              # most traded Skinport items added to the Steam watchlist
 
 # fetch(url, headers) -> (status, body bytes, response headers)
@@ -517,11 +520,11 @@ def run(root: Path | None = None, fetch: Fetch = http_fetch, steam: bool = True,
                                     f" ({wait // 3600} h, refused {st['refusals']} run{'s' if st['refusals'] > 1 else ''} in a row)")
         elif n_ok:
             st.update(cooldown_s=0, until_ms=0, refusals=0)
-        if batch and not n_ok:
-            # Asked and nothing came back: the run fails (Skinport is already written).
+        if batch and not n_ok and not limited:
+            # Answered and no price in any answer: the run fails (Skinport is already written). A 429 is Steam's
+            # filter, not a fault here: the refused line and the cool-down only (2026-11-03).
             report["steam_failed"] = True
-            if not limited:
-                report["errors"].append(f"steam: 0 of {len(batch)} prices came back")
+            report["errors"].append(f"steam: 0 of {len(batch)} prices came back")
     st["cursor"] = cursor
     report["steam_cursor"] = cursor
     report["ok"] = items is not None and sales is not None
@@ -540,12 +543,12 @@ def main(argv: list[str] | None = None) -> int:
     steam_max = STEAM_MAX_PER_RUN
     if "--steam-max" in argv:
         steam_max = int(argv[argv.index("--steam-max") + 1])
-    rep = run(steam="--no-steam" not in argv, steam_max=steam_max)
+    rep = run(steam=STEAM_SINGLE or ("--steam" in argv and "--no-steam" not in argv), steam_max=steam_max)
     for e in rep["errors"]:
         print(e)
     print(json.dumps(rep, indent=2))
-    # Skinport missing, or Steam asked and no price back: red. A run that
-    # skips Steam for the cool-down is not, so cs2-run still runs on Skinport.
+    # Skinport missing, or Steam answered with no price: red. A 429 or a run
+    # that skips Steam for the cool-down is not, so cs2-run still runs on Skinport.
     return 0 if rep["ok"] and not rep["steam_failed"] else 1
 
 
