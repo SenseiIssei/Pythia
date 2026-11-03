@@ -232,20 +232,20 @@ def test_the_briefing_shows_the_research_lanes(data):
     text = notify.plain(notify.render_post(cards, "telegram", lang="de"))
     assert "Forschung" in text and "Bomber-Coins" in text and "Nein, zu langsam." in text
     assert "zu alt" not in text, "only the last 24 hours"
-    assert "Realistisches Papier (R1)" in text and "1 warten, 1 zurückgestellt" in text and "30,50" in text
+    assert "Realistisches Papier (R1)" in text and "1 warten, 1 zurückgestellt" in text
+    assert "30,50" not in text and "Guthaben" not in text, "no API credit line"
     assert "1 Aufgabe fertig" in text, "in the summary"
 
 
-def test_the_briefing_shows_the_budget_line_at_balance_0(data):
+def test_the_briefing_never_shows_an_api_budget(data):
+    # There is no API account (the words come from the local model): an "overspent" credit only confused.
     now = utc(2026, 10, 27, 7, 0)
     rep = {"updated_ms": now - 600_000, "done": [], "running": [], "queued": 0,
            "budget": {"balance_usd": 0.0, "left_usd": -68.09, "reserve_usd": 10.0, "paused": True}}
-    for lang, want in (("de", "noch -68,09 $, Reserve 10 $ · Forschung pausiert"),
-                       ("en", "-$68.09 left, reserve $10 · research paused")):
+    for lang in ("de", "en"):
         parts, _ = briefing.research_section(rep, now, lang)
-        text = notify.plain(notify.render_post([notify.Card("x", "x", None, parts)], "telegram", lang=lang))
-        assert want in text, text
-    assert briefing.research_section(dict(rep, budget={}), now, "en")[0] == [], "no budget known, no line"
+        text = notify.plain(notify.render_post([notify.Card("x", "x", None, parts)], "telegram", lang=lang)) if parts else ""
+        assert "68" not in text and "API" not in text and "Guthaben" not in text and "credit" not in text, text
 
 
 def test_the_briefing_paper_line_shows_the_small_wallets_in_euro(data):

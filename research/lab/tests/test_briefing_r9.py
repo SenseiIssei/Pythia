@@ -63,18 +63,19 @@ def build(lang: str, now: int = NOW, engines=None):
 
 # ---------------------------------------------------------------- the recorded day
 
-def test_the_recorded_day_lists_the_budget_the_local_model_and_the_stopped_bot_first(recorded):
+def test_the_recorded_day_lists_the_local_model_and_the_stopped_bot_first_and_no_api_budget(recorded):
     for lang in ("de", "en"):
         cards, text = build(lang)
         first = cards[0]
-        assert first.title == ("Zu entscheiden (3)" if lang == "de" else "To decide (3)") and first.emoji == "🟠"
+        assert first.title == ("Zu entscheiden (2)" if lang == "de" else "To decide (2)") and first.emoji == "🟠"
         items = [p.text for p in first.parts]
         assert items[0].startswith("pump.fun-Bot gestoppt seit Sa 24. Okt: gesamt -0,4766 SOL, Wallet 0,0415 SOL"
                                    if lang == "de" else "pump.fun bot stopped since Sat 24 Oct: -0.4766 SOL in all")
-        assert items[1] == ("API-Budget überzogen: -165,80 $, die Lanes sind pausiert" if lang == "de"
-                            else "API budget overspent: -$165.80, the lanes are paused")
-        assert items[2] == ("local-llm ist rot: letzter Lauf mit Exit 125, 74-mal in Folge" if lang == "de"
+        assert items[1] == ("local-llm ist rot: letzter Lauf mit Exit 125, 74-mal in Folge" if lang == "de"
                             else "local-llm is red: last run failed, exit 125, 74 in a row")
+        # The recorded day's research report still carries a budget of -165.80 USD: never shown any more.
+        assert not any("API" in x or "165" in x for x in items), items
+        assert "API" not in text and "Guthaben" not in text and "credit" not in text, text
         assert text.startswith(f"🟠 {first.title}\n•"), "the first lines are the decisions"
         assert len(text) < 2000, len(text)
         assert not any("pokemon" in x for x in items), "a red job that touches neither real money nor the briefing"
@@ -130,8 +131,8 @@ def test_each_rule_says_what_needs_the_owner(env):
     assert d(engines=[live_ap("paused", 101.0)]) == ["Kraken BTC (real money) is paused"]
     assert d(engines=[live_ap("running", 97.0)]) == ["Kraken BTC (real money) -3.0 % since its start"]
     assert d(engines=[live_ap("running", 103.0)]) == []
-    assert d(research={"budget": {"balance_usd": 0.0, "left_usd": 12.0}}) == [], "not overspent"
-    assert d(research={"budget": {"left_usd": -4.5, "paused": False}}) == ["API budget overspent: -$4.50"]
+    assert d(research={"budget": {"balance_usd": 0.0, "left_usd": 12.0}}) == [], "no API budget decision"
+    assert d(research={"budget": {"left_usd": -4.5, "paused": True}}) == [], "no API account: never a decision"
     red = {"checks": [{"name": "job pokemon", "ok": False, "detail": "x"}, {"name": "job briefing", "ok": False},
                       {"name": "pythia-pumpfun-live", "ok": False, "detail": "not running"},
                       {"name": "job learn", "ok": True}]}
@@ -266,7 +267,7 @@ def test_the_briefing_run_posts_once_in_one_language_and_logs_it(recorded, monke
     assert briefing.run(NOW, force=True, engines=[], eur=lambda: 160.0, chart=False,
                         poster=lambda text: tg.append(text) or (True, None),
                         discord_poster=lambda url, payload, image: dc.append(payload) or (True, None)) == 0
-    assert len(tg) == 1 and len(dc) == 1 and dc[0]["embeds"][0]["title"] == "🟠 Zu entscheiden (3)"
+    assert len(tg) == 1 and len(dc) == 1 and dc[0]["embeds"][0]["title"] == "🟠 Zu entscheiden (2)"
     assert len(notify.plain(tg[0])) < 2000
     out = [(r["via"], r["category"], r["outcome"]) for r in notify.read_sent()]
     assert out == [("telegram", "dailyPnl", "sent"), ("discord", "briefing", "sent")]

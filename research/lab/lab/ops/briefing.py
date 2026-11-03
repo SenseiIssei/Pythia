@@ -25,8 +25,8 @@ numbers formatted in the messages' language, one overview chart:
                          collector's headlines (<data>/ai/news), the three most relevant when the local
                          model tagged them (<data>/ai/news_tags, lab.ai.local), else the newest
 
-First "To decide (n)": what needs the owner today by fixed rules (decisions(): real money stopped or losing, the
-API budget overspent, a red check that touches real money or the briefing, a book crossing its bar). The real-money
+First "To decide (n)": what needs the owner today by fixed rules (decisions(): real money stopped or losing, a
+red check that touches real money or the briefing, a book crossing its bar). The real-money
 card is always there, coloured by its state (stopped is never green). A section whose report is there but stale is
 named in the footer ("Missing today"); the whole post stays under 2,000 characters, the last sections giving way.
 
@@ -508,7 +508,8 @@ def news_section(now: int, lang: str, root: Path | None = None, n: int = 3) -> l
 
 def research_section(rep: dict | None, now: int, lang: str, n: int = 5) -> tuple[list, str | None]:
     """The task lanes (reports/research/latest.json, written on the host by research-report.py): what
-    finished in the last 24 hours with its verdict, what runs, what waits, the API credit. (parts,
+    finished in the last 24 hours with its verdict, what runs, what waits. No API credit: there is no API account,
+    the words come from the local model (lab.ai.local), so a credit line only confused. (parts,
     a few words for the summary)."""
     if rep is None:
         return [], None
@@ -529,14 +530,6 @@ def research_section(rep: dict | None, now: int, lang: str, n: int = 5) -> tuple
     held = rep.get("held") or []
     if waiting or held:
         parts.append(Line(tr("bf_res_queue", lang, n=waiting, held=len(held)), "🗂️ " + tr("bf_res_queue_lead", lang)))
-    b = rep.get("budget") or {}
-    # also at balance 0: an overspent, paused budget is exactly what the owner must see
-    if isinstance(b, dict) and any(_num(b.get(k)) is not None for k in ("balance_usd", "left_usd")):
-        text = tr("bf_res_budget", lang, left=notify.money(_num(b.get("left_usd")) or 0.0, 2, lang),
-                  reserve=notify.money(_num(b.get("reserve_usd")) or 0.0, 0, lang))
-        if b.get("paused"):
-            text += " · " + tr("bf_res_paused", lang)
-        parts.append(Line(text, "💳 " + tr("bf_res_budget_lead", lang)))
     ok = sum(1 for d in done if d.get("ok"))
     words = tr("bf_sum_research", lang, n=ok) if ok else None
     return parts, words
@@ -729,8 +722,8 @@ def check_detail(detail, lang: str) -> str | None:
 def decisions(now: int, lang: str, status: dict | None, ledger: list[dict], engines: list[dict], research: dict | None,
               health: dict | None, readiness: dict | None, factories: dict, eur: float | None = None) -> list[str]:
     """What needs the owner today, by fixed rules, one short line each, in this order: real money stopped or losing
-    (the pump.fun bot stopped, quiet, paused or down yesterday; a live autopilot paused or below its start), the API
-    budget overspent, a red check that touches real money or the briefing, a book crossing its bar (an autopilot
+    (the pump.fun bot stopped, quiet, paused or down yesterday; a live autopilot paused or below its start), a red
+    check that touches real money or the briefing, a book crossing its bar (an autopilot
     ready for real money, a factory winner)."""
     out = []
     state, at = pumpfun_state(status, now)
@@ -755,11 +748,6 @@ def decisions(now: int, lang: str, status: dict | None, ledger: list[dict], engi
             out.append(tr("bf_dec_ap_paused", lang, name=name))
         elif eq is not None and start and eq < start:
             out.append(tr("bf_dec_ap_losing", lang, name=name, pct=notify.signed_pct((eq / start - 1) * 100, 1, lang)))
-    b = (research or {}).get("budget") or {}
-    left, bal = _num(b.get("left_usd")), _num(b.get("balance_usd"))
-    if (left is not None and left < 0) or (bal is not None and bal < 0):
-        out.append(tr("bf_dec_budget", lang, left=notify.money(left if left is not None else bal, 2, lang),
-                      paused=tr("bf_dec_budget_paused", lang) if b.get("paused") else ""))
     for c in (health or {}).get("checks") or []:
         name = str(c.get("name") or "")
         if c.get("ok") or name not in REAL_MONEY_CHECKS | BRIEFING_CHECKS:
