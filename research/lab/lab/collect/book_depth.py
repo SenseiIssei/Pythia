@@ -239,21 +239,26 @@ def hourly(raw: pl.DataFrame) -> pl.DataFrame:
 
 def plan(until: date) -> dict[str, tuple[date, date]]:
     """{perp symbol: (first day, last day)}: um_metrics' stored symbols over their stored days from
-    FIRST_DAY (to `until` while their file reaches the last 7 days), and the lab coins' perps."""
+    FIRST_DAY, to `until` while their file reaches within RECENT_DAYS of the newest day um_metrics stored
+    (the symbols it still followed at its last run), and the lab coins' perps. Measured against
+    um_metrics' own newest day, not against `until`: um_metrics was collected once (to 2026-10-21), and
+    against `until` every symbol stopped there from 10-29 on, no new day and an empty hourly feed row."""
     out: dict[str, tuple[date, date]] = {}
     d = um_metrics.out_dir()
+    spans = {}
     for f in sorted(d.glob("*.parquet")) if d.exists() else []:
         try:
             days = pl.read_parquet(f, columns=["day_us"])["day_us"]
         except (OSError, pl.exceptions.PolarsError):
             continue
-        if days.is_empty():
-            continue
-        a, b = pit.day_of(int(days.min())), pit.day_of(int(days.max()))
-        last = until if b >= until - timedelta(days=RECENT_DAYS) else min(b, until)
+        if not days.is_empty() and f.stem.endswith("USDT"):
+            spans[f.stem] = (pit.day_of(int(days.min())), pit.day_of(int(days.max())))
+    newest = max((b for _, b in spans.values()), default=until)
+    for s, (a, b) in spans.items():
+        last = until if b >= min(newest, until) - timedelta(days=RECENT_DAYS) else min(b, until)
         first = max(FIRST_DAY, a)
-        if f.stem.endswith("USDT") and first <= last:
-            out[f.stem] = (first, last)
+        if first <= last:
+            out[s] = (first, last)
     for c in UNIVERSE:
         out.setdefault(perp_symbol(c), (FIRST_DAY, until))
     return dict(sorted(out.items()))
@@ -559,13 +564,17 @@ def read_delistings() -> pl.DataFrame:
 # Run
 # ---------------------------------------------------------------------------
 
-def health(listings: dict[str, dict], errors: dict[str, str], now: int, dry: bool) -> dict:
+def health(listings: dict[str, dict], errors: dict[str, str], now: int, dry: bool,
+           checked_us: int | None = None) -> dict:
     """Newest stored hour of the perps whose window still reaches the last 7 days (the oldest of them),
     gaps in their last 7 days, the delisting table; the format of pit.write_health. `listings` holds each
     perp's days inside its window, not the archive's: the archive can list new days of a symbol the lab
-    stopped following (BNTUSDT ended 2023-12-10 and is listed again), which made the feed look 25,000 h old."""
+    stopped following (BNTUSDT ended 2023-12-10 and is listed again), which made the feed look 25,000 h old.
+    The delisting table's age is its last successful check (`checked_us`, else the one health.json has), not its
+    newest row: a week without a new delisting is no stale table (it read 146 h old on 2026-11-03). The days
+    missing in any perp count once (pit.table_health's rule)."""
     live = [s for s, lst in listings.items() if lst and max(lst) >= pit.day_of(now) - timedelta(days=RECENT_DAYS)]
-    lasts, gaps, rows = [], 0, 0
+    lasts, miss, rows = [], set(), 0
     for s in live:
         files = sorted((out_dir() / "hourly" / f"symbol={s}").glob("*.parquet"))
         if not files:
@@ -574,12 +583,16 @@ def health(listings: dict[str, dict], errors: dict[str, str], now: int, dry: boo
         rows += h.height
         if h.height:
             lasts.append(int(h["ts_us"].max()))
-            gaps += pit.gaps(h["ts_us"].to_list(), DAY_US, now)
+            miss |= pit.missing_steps(h["ts_us"].to_list(), DAY_US, now)
     d = read_delistings()
-    tables = {"hourly": {"rows": rows, "last_ts_us": min(lasts) if lasts else None, "gaps": gaps, "missing": [],
-                         "schema_ok": True},
-              "delistings": {"rows": d.height, "last_ts_us": int(d["collected_us"].max()) if d.height else None,
-                             "gaps": 0, "missing": [], "schema_ok": True}}
+    if checked_us is None:
+        prev = (_json(out_dir() / "health.json", {}).get("tables") or {}).get("delistings") or {}
+        checked_us = prev.get("checked_us")
+    newest = int(d["collected_us"].max()) if d.height else None
+    tables = {"hourly": {"rows": rows, "last_ts_us": min(lasts) if lasts else None, "gaps": len(miss),
+                         "missing": [], "schema_ok": True},
+              "delistings": {"rows": d.height, "last_ts_us": max(x for x in (checked_us, newest, 0) if x is not None)
+                             or None, "checked_us": checked_us, "gaps": 0, "missing": [], "schema_ok": True}}
     doc = {"at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "source": "book_depth", "tables": tables,
            "errors": errors}
     if not dry:
@@ -658,10 +671,12 @@ def run(until: date | None = None, symbols: list[str] | None = None, max_files: 
 
     with ThreadPoolExecutor(WORKERS) as ex:
         list(ex.map(one, [s for s, v in picked.items() if v]))
+    checked = None
     if delistings:
         pit.step(errors, "delistings", lambda: update_delistings({s: j["listed"] for s, j in jobs.items()}, until,
                                                                  fetch_json or pit.paced(3.0)))
-    health({s: j["window_days"] for s, j in jobs.items()}, errors, pit.now_us(), False)
+        checked = None if "delistings" in errors else pit.now_us()
+    health({s: j["window_days"] for s, j in jobs.items()}, errors, pit.now_us(), False, checked_us=checked)
     pit.step(errors, "prune", lambda: print(f"book_depth: {prune_raw():.2f} GB of closed months' raw deleted",
                                              flush=True))
     print(f"book_depth: {done['ok']:,} files stored, {done['bad']} failed their checksum, "

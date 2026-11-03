@@ -166,7 +166,8 @@ def _day_csv(day: date, k: float = 1.0) -> str:
     return "\n".join(rows) + "\n"
 
 
-def test_run_fetches_the_window_resumes_and_writes_health(store, tmp_path):
+def test_run_fetches_the_window_resumes_and_writes_health(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(pit, "now_us", lambda: us(2026, 10, 24, 12))   # the health's last 7 days (it read the clock)
     days = {date(2026, 10, d): _day_csv(date(2026, 10, d)) for d in (20, 21, 23)}
     fetch, calls = _archive(days)
     _um(tmp_path, "AAAUSDT", date(2026, 10, 1), date(2026, 10, 23))
@@ -189,6 +190,7 @@ def test_health_ignores_new_archive_days_outside_the_window(store, tmp_path):
     days = {d: _day_csv(d) for d in old + [date(2026, 10, 21), date(2026, 10, 22)]}
     fetch, _ = _archive(days)
     _um(tmp_path, "AAAUSDT", old[0], old[-1])                 # the lab followed it until 2023-12-02
+    _um(tmp_path, "BBBUSDT", date(2023, 1, 1), date(2026, 10, 21))   # um_metrics' last run: 2026-10-21
     res = bd.run(until=date(2026, 10, 23), symbols=["AAAUSDT"], fetch=fetch, delistings=False)
     assert res["fetched"] == 2 and bd.manifest("AAAUSDT") == {"2023-12-01": "ok", "2023-12-02": "ok"}
     doc = json.loads((store / "health.json").read_text())
@@ -240,6 +242,52 @@ def test_plan_takes_um_metrics_symbols_from_2023_and_the_lab_perps(tmp_path):
     assert "GONEUSDT" not in p
     assert p["BTCUSDT"] == (date(2023, 1, 1), date(2026, 10, 25)) and "1000PEPEUSDT" in p
     assert bd.base_of("1000PEPEUSDT") == "PEPE" and bd.base_of("BTCUSDT") == "BTC"
+
+
+def test_plan_follows_the_symbols_to_today_after_um_metrics_stopped(tmp_path):
+    # 2026-11-03: um_metrics was collected once (to 2026-10-21); from 10-29 on every symbol's window ended there,
+    # no new day was fetched and the hourly feed row was empty
+    _um(tmp_path, "NEWUSDT", date(2024, 1, 1), date(2026, 10, 21))
+    _um(tmp_path, "BTCUSDT", date(2022, 1, 1), date(2026, 10, 20))
+    _um(tmp_path, "DROPUSDT", date(2024, 1, 1), date(2026, 9, 1))      # left the 120 before um_metrics' last run
+    p = bd.plan(date(2026, 11, 2))
+    assert p["NEWUSDT"] == (date(2024, 1, 1), date(2026, 11, 2)) and p["BTCUSDT"][1] == date(2026, 11, 2)
+    assert p["DROPUSDT"] == (date(2024, 1, 1), date(2026, 9, 1))
+    assert bd.plan(date(2026, 10, 10))["NEWUSDT"][1] == date(2026, 10, 10)
+
+
+def test_the_missing_days_are_fetched_next_run_and_the_delistings_age_is_the_last_check(store, tmp_path,
+                                                                                         monkeypatch):
+    now = us(2026, 10, 30, 12)
+    monkeypatch.setattr(pit, "now_us", lambda: now)
+    days = {date(2026, 10, d): _day_csv(date(2026, 10, d)) for d in range(18, 30)}
+    fetch, _ = _archive(days)
+    _um(tmp_path, "AAAUSDT", date(2026, 1, 1), date(2026, 10, 21))
+    res = bd.run(until=date(2026, 10, 29), symbols=["AAAUSDT"], fetch=fetch, delistings=False)
+    assert res["fetched"] == 12 and max(bd.manifest("AAAUSDT")) == "2026-10-29"
+    doc = json.loads((store / "health.json").read_text())
+    assert doc["tables"]["hourly"]["last_ts_us"] == us(2026, 10, 29, 1) and doc["tables"]["hourly"]["rows"] > 0
+    # the delisting table: its newest row is a week old, its last check is now
+    week = pit.now_us() - 7 * D
+    bd.save_delistings(bd.delist_frame([{"symbol": "OLDUSDT", "base": "OLD", "kind": "perp", "announced_us": week,
+                                         "delisted_us": week, "source": "archive", "article": ""}], week))
+    monkeypatch.setattr(bd, "update_delistings", lambda *a, **k: {"new": 0})
+    t0 = pit.now_us()
+    bd.run(until=date(2026, 10, 29), symbols=["AAAUSDT"], fetch=fetch, fetch_json=lambda *a, **k: None)
+    dl = json.loads((store / "health.json").read_text())["tables"]["delistings"]
+    assert dl["last_ts_us"] >= t0 and dl["checked_us"] >= t0 and dl["rows"] == 1
+    # a failed check keeps the last successful one; --no-delistings too
+
+    def boom(*a, **k):
+        raise RuntimeError("HTTP Error 429")
+    monkeypatch.setattr(bd, "update_delistings", boom)
+    res = bd.run(until=date(2026, 10, 29), symbols=["AAAUSDT"], fetch=fetch, fetch_json=lambda *a, **k: None)
+    assert "delistings" in res["errors"]
+    assert json.loads((store / "health.json").read_text())["tables"]["delistings"]["checked_us"] == dl["checked_us"]
+    bd.run(until=date(2026, 10, 29), symbols=["AAAUSDT"], fetch=fetch, delistings=False)
+    assert json.loads((store / "health.json").read_text())["tables"]["delistings"]["last_ts_us"] == dl["checked_us"]
+    (store / "health.json").unlink()
+    assert bd.health({}, {}, pit.now_us(), True)["tables"]["delistings"]["last_ts_us"] == week   # no check yet
 
 
 # ---------------------------------------------------------------- cost of a market order
