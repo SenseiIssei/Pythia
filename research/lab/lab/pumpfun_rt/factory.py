@@ -68,10 +68,16 @@ from . import realistic as R
 from . import smallwallet as SW
 
 TRIALS = 300                               # per night, PYTHIA_PF_FACTORY_TRIALS
-BUDGET_S = 8_400                           # the night's run stops asking for trials after this (the job's limit 2.5 h)
+BUDGET_S = 8_400                           # the night's replays end by this (the job's limit 2.5 h); the search's own
+                                           # end is this less the held-back replay's reserve (hold_s)
 MODEL_TRIALS = 12                          # per label and night, PYTHIA_PF_FACTORY_MODEL_TRIALS
 MODEL_BUDGET_S = 1_500
-BATCH = 75                                 # trials per replay (300 a night: four replays of the search days)
+BATCH = 25                                 # trials per replay at most (75 until 2026-11-03: one replay of 12 days
+                                           # took 6,414 s, the held-back one was cut off at the 9,000 s limit)
+MIN_BATCH = 5                              # a replay for fewer trials than this is not started (a rerun does them)
+REPLAY_S_DAY = 170.0                       # a replay's seconds per day: the base (with the day models trained) and
+TRIAL_S_DAY = 5.0                          # per trial (measured on 2026-10-30..11-03: 75 trials 400 to 535 s a day,
+HOLD_S_DAY = 230.0                         # the held-back 3 about 180 s a day); the held-back replay's reserve a day
 WINDOW_DAYS = 15                           # the full days replayed: the search's and the held-back ones (MIN_DAYS
                                            # scored: less the first two without every model and three held back)
 HOLD_DAYS = 2
@@ -293,9 +299,43 @@ def held_before(ledger: list[dict], night: str) -> list[str]:
     return sorted({x for r in hb if r.get("night") == last for x in r.get("days") or ()})
 
 
+def replay_s(n_days: int, k: int) -> float:
+    """The estimated seconds of one replay of `k` trials over `n_days` days."""
+    return n_days * (REPLAY_S_DAY + k * TRIAL_S_DAY)
+
+
+def hold_s(days: Days) -> float:
+    """The reserve for the held-back replay (TOP_HOLD trials over the whole window)."""
+    return HOLD_S_DAY * len(days.days) if days.hold else 0.0
+
+
+def fit_k(room: float, n_days: int, slow: float = 1.0) -> int:
+    """The most trials one replay of `n_days` days can take in `room` seconds, at `slow` times the estimate."""
+    if n_days <= 0:
+        return BATCH
+    return max(0, int((room / max(slow, 1e-6) / n_days - REPLAY_S_DAY) // TRIAL_S_DAY))
+
+
+def last_slow(d: Path) -> float:
+    """The last night's replay time against replay_s (timing.json), within 0.5 to 3; 1.0 without one."""
+    try:
+        x = float(json.loads((d / "timing.json").read_text(encoding="utf-8"))["slow"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 1.0
+    return min(3.0, max(0.5, x)) if math.isfinite(x) else 1.0
+
+
+def save_slow(d: Path, slow: float) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "timing.json").write_text(json.dumps({"slow": round(float(slow), 4)}), encoding="utf-8")
+
+
 class Replayer:
     """One replay of the record per batch of trials; the day models trained once (the first replay with a label book)
-    and kept for every later one, the held-back days' models trained by the hold-out replay."""
+    and kept for every later one, the held-back days' models trained by the hold-out replay. `slow` is the last
+    replay's seconds against replay_s (1.0 before the first)."""
+
+    slow = 1.0
 
     def __init__(self, days: Days, model: R.Model, root=None, log=print):
         self.d, self.model, self.root, self.log = days, model, root, log
@@ -348,7 +388,10 @@ class Replayer:
                 self.trained[nd] = T10.usable(self.by_day[nd])
             self.log(f"f3: {day} done ({n:,} events, {time.time() - t0:.0f} s)")
         sim.replay(days, eng, root, progress=next_day, until_ms=t_hi)
-        self.log(f"f3: replay of {len(specs)} trial(s) over {len(days)} day(s) in {time.time() - t0:.0f} s")
+        took = time.time() - t0
+        self.slow = took / max(1.0, replay_s(len(days), len(specs)))
+        self.log(f"f3: replay of {len(specs)} trial(s) over {len(days)} day(s) in {took:.0f} s "
+                 f"({self.slow:.2f} times the estimate)")
         return {n: SW.entries(p) for n, p in pipes.items()}
 
     def scored(self) -> list[str]:
@@ -501,7 +544,9 @@ def study_of(d: Path, night: str, seed: int = SEED):
 
 def search(rp: Replayer, d: Path, night: str, budget: int, deadline: float, log=print) -> list[dict]:
     """The night's trials (resumed: the ones the ledger has for this night count), in batches of one replay each;
-    every trial into the ledger. Returns the night's trial lines."""
+    every trial into the ledger. A batch takes as many trials (at most BATCH) as its estimated replay fits before
+    `deadline` (the search's own, the held-back replay's reserve before the night's end); none is started for fewer
+    than MIN_BATCH. Returns the night's trial lines."""
     import optuna
     path = d / "ledger.jsonl"
     led = read_ledger(path)
@@ -517,18 +562,15 @@ def search(rp: Replayer, d: Path, night: str, budget: int, deadline: float, log=
         if t.state == optuna.trial.TrialState.RUNNING:
             study.tell(t.number, state=optuna.trial.TrialState.FAIL)
     left = budget - len(mine)
-    per_s = None
     while left > 0:
-        if per_s is not None and deadline - time.time() < 2 * per_s:   # a batch and the held-back replay must fit
+        k = min(BATCH, left, fit_k(deadline - time.time(), len(rp.d.replay), getattr(rp, "slow", 1.0)))
+        if k < min(MIN_BATCH, left):
             log(f"f3: {left} trial(s) left for a rerun of this night (time)")
             break
-        k = min(BATCH, left)
         trials = [study.ask() for _ in range(k)]
         n0 = len(trials_of(read_ledger(path)))
         specs = [(book_id(n0 + j), space(t)) for j, t in enumerate(trials)]
-        t0 = time.time()
         ent = rp.run(specs, rp.d.replay)
-        per_s = time.time() - t0
         days = rp.scored()
         dr = draws(len(days))
         rows = []
@@ -932,8 +974,19 @@ def run(now_ms: int | None = None, trials: int | None = None, model_trials: int 
                          params_file=d / "params.json") if model_trials else {"error": "no trials asked"}
     fit_ = R.fit(R._measured(), hold_ms)                      # the live orders up to the held-back days
     rp = Replayer(days, R.Model(fit_, R.LiveConfig()), root, log)
-    mine = search(rp, d, night, trials, deadline, log) if trials else []
-    held = holdback(rp, d, night, mine, log) if mine else []
+    rp.slow = last_slow(d)                                    # last night's replay against the estimate
+    reserve = hold_s(days)
+    mine = search(rp, d, night, trials, deadline - reserve, log) if trials else []
+    held = []
+    if mine:
+        need = reserve * max(1.0, getattr(rp, "slow", 1.0))
+        if deadline - time.time() >= need:
+            held = holdback(rp, d, night, mine, log)
+        else:                                                 # never cut off by the job's limit (exit 124)
+            log(f"f3: no time for the held-back replay ({deadline - time.time():.0f} s left, {need:.0f} s needed); "
+                f"a rerun of this night does it")
+    if mine:
+        save_slow(d, rp.slow)
     led = read_ledger(d / "ledger.jsonl")
     won = winners(mine, held, led)
     from .live import paper_dir

@@ -276,6 +276,55 @@ def test_the_ledger_only_grows_and_a_night_resumes_where_it_stopped(tmp_path, mo
     assert len(led) == 11 + F.TOP_HOLD                          # every line kept
 
 
+class SlowRp(FakeRp):
+    """A replayer that took twice its estimate."""
+
+    def run(self, specs, days):
+        self.slow = 2.0
+        return super().run(specs, days)
+
+
+def test_a_batch_takes_only_the_trials_its_replay_fits_before_the_searchs_end(tmp_path, monkeypatch):
+    import time
+    monkeypatch.setattr(F, "PATHS", 50)
+    n = len(DAYS)
+    assert F.fit_k(F.replay_s(n, 7) + 1, n) == 7 and F.fit_k(F.replay_s(n, 7), n, slow=2.0) < 7
+    assert F.fit_k(F.replay_s(n, 3), n) == 3 and F.fit_k(10, n) == 0
+    rp = SlowRp()
+    mine = F.search(rp, tmp_path, "2026-10-26", 20, time.time() + F.replay_s(n, 7) + 1, log=lambda *a: None)
+    assert len(mine) == 7 and [k for k, _ in rp.runs] == [7]      # the second batch would not fit at twice the time
+    rp.slow = 1.0
+    again = F.search(rp, tmp_path, "2026-10-26", 20, time.time() + F.replay_s(n, 3) + 1, log=lambda *a: None)
+    assert len(again) == 7 and len(rp.runs) == 1                  # room for 3 only: under MIN_BATCH, left to a rerun
+    rp.slow = 1.0
+    last = F.search(rp, tmp_path, "2026-10-26", 9, time.time() + F.replay_s(n, 3) + 1, log=lambda *a: None)
+    assert len(last) == 9 and [k for k, _ in rp.runs] == [7, 2]   # two left: they fit and run
+    assert F.BATCH <= 25 and F.MIN_BATCH <= F.BATCH
+
+
+def test_the_night_skips_the_held_back_replay_rather_than_run_into_the_jobs_limit(tmp_path, monkeypatch):
+    from lab.pumpfun_rt import live
+    monkeypatch.setattr(F, "PATHS", 50)
+    rps = []
+    monkeypatch.setattr(F, "Days", lambda now_ms, root=None, held=(): FakeDays())
+    monkeypatch.setattr(F, "Replayer", lambda days, model, root=None, log=print: rps.append(SlowRp()) or rps[-1])
+    monkeypatch.setattr(R, "_measured", lambda: [])
+    monkeypatch.setattr(R, "sol_eur", lambda: 90.0)
+    monkeypatch.setattr(live, "paper_dir", lambda: tmp_path)
+    reserve = F.hold_s(FakeDays())
+    assert reserve == F.HOLD_S_DAY * len(FakeDays().days)
+    logs = []
+    s = F.run(now_ms=T0, trials=8, model_trials=0, d=tmp_path / "f", out=tmp_path / "out",
+              budget_s=reserve + F.replay_s(len(DAYS), 8) + 5, log=logs.append)
+    assert s["trials_tonight"] == 8 and not s["holdback"] and [k for k, _ in rps[0].runs] == [8]
+    assert any("no time for the held-back replay" in x for x in logs)
+    assert F.last_slow(tmp_path / "f") == 2.0                    # the next night starts from it
+    s = F.run(now_ms=T0, trials=8, model_trials=0, d=tmp_path / "f", out=tmp_path / "out", log=lambda *a: None)
+    assert len(s["holdback"]) == F.TOP_HOLD and rps[-1].runs == [(F.TOP_HOLD, FakeDays().days)]   # the rerun
+    (tmp_path / "f" / "timing.json").write_text("x")
+    assert F.last_slow(tmp_path / "f") == 1.0
+
+
 def test_a_winner_needs_the_bar_and_the_held_back_days(monkeypatch):
     r = {"id": "F3_00001", "entries": 400, "sharpe": 0.3, "skew": 0.0, "kurt": 3.0, "median": 0.8, "score": 0.8,
          "days": [f"d{i}" for i in range(10)]}
