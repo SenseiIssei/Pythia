@@ -156,41 +156,53 @@ def as_of(df: pl.DataFrame, t_us: int) -> pl.DataFrame:
 # Health
 # ---------------------------------------------------------------------------
 
-def gaps(ts: list[int], step_us: int, now: int, weekdays_only: bool = False) -> int:
-    """Missing steps in the last 7 days (from the first stored step in that window), the newest step's
-    lag not counted (that is the age's job)."""
+def missing_steps(ts: list[int], step_us: int, now: int, weekdays_only: bool = False, tz_hours: int = 0) -> set[int]:
+    """The missing steps (step numbers, ts // step_us) in the last 7 days, from the first stored step in that
+    window, the newest step's lag not counted (that is the age's job). weekdays_only leaves out the steps on a
+    Saturday or Sunday at UTC + tz_hours (-5: New York's weekend, its summer hour aside)."""
     lo = now - GAP_WINDOW_US
     have = sorted({t // step_us for t in ts if t >= lo})
     if not have:
-        return 0
-    n = 0
+        return set()
+    got, out = set(have), set()
     for s in range(have[0], have[-1] + 1):
-        if s in have:
+        if s in got:
             continue
-        if weekdays_only and datetime.fromtimestamp(s * step_us / 1e6, UTC).weekday() >= 5:
+        if weekdays_only and datetime.fromtimestamp(s * step_us / 1e6 + tz_hours * 3600, UTC).weekday() >= 5:
             continue
-        n += 1
-    return n
+        out.add(s)
+    return out
+
+
+def gaps(ts: list[int], step_us: int, now: int, weekdays_only: bool = False, tz_hours: int = 0) -> int:
+    """How many steps are missing in the last 7 days (missing_steps)."""
+    return len(missing_steps(ts, step_us, now, weekdays_only, tz_hours))
 
 
 def table_health(source: str, table: str, expect: list[str], step_us: int, now: int, by: str | None = None,
-                 weekdays_only: bool = False) -> dict:
+                 weekdays_only: bool = False, tz_hours: int = 0) -> dict:
     """Newest value, row count, gaps and missing columns of one table (per `by` group for the gaps;
-    the newest value is the oldest group's newest, so one dead group shows)."""
+    the newest value is the oldest group's newest, so one dead group shows). The gaps of `by` groups are
+    the steps missing in any group, each step once (one hour missing for all 33 coins is 1, not 33)."""
     df = read(source, table)
     if df is None or df.is_empty():
         return {"rows": 0, "last_ts_us": None, "gaps": 0, "missing": [], "schema_ok": True}
     missing = [c for c in expect + PIT if c not in df.columns]
     groups = [df] if by is None or by not in df.columns else [g for _, g in df.group_by(by)]
     lasts = [int(g["ts_us"].max()) for g in groups]
-    gp = sum(gaps(g["ts_us"].to_list(), step_us, now, weekdays_only) for g in groups)
+    gp = len(set().union(*(missing_steps(g["ts_us"].to_list(), step_us, now, weekdays_only, tz_hours)
+                           for g in groups)))
     return {"rows": df.height, "last_ts_us": min(lasts), "gaps": gp, "missing": missing, "schema_ok": not missing,
             "backfilled": int(df["backfilled"].sum()) if "backfilled" in df.columns else None}
 
 
-def write_health(source: str, tables: dict[str, dict], errors: dict[str, str], dry: bool = False) -> dict:
+def write_health(source: str, tables: dict[str, dict], errors: dict[str, str], dry: bool = False,
+                 notes: dict[str, str] | None = None) -> dict:
+    """health.json; `notes` are hints the feed row does not turn red on (an expected empty answer)."""
     doc = {"at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "source": source, "tables": tables,
            "errors": errors}
+    if notes:
+        doc["notes"] = notes
     if not dry:
         p = FREE / source / "health.json"
         p.parent.mkdir(parents=True, exist_ok=True)

@@ -141,6 +141,24 @@ def test_a_missing_field_is_empty_and_a_missing_price_is_an_error():
     assert len(xs.parse_actions("SPYx", h)) == len(h["nodes"]) - 1
 
 
+def test_no_quote_on_the_us_weekend_is_a_note_and_its_steps_are_no_gaps():
+    # 2026-11-03: the feed row was red every weekend (no quote Sat 12:00, Sun 12:00, Mon 00:00 UTC; max_gaps 1)
+    assert xs.weekend(us(2026, 10, 31, 12)) and xs.weekend(us(2026, 11, 2, 0))        # Mon 00:00 UTC: Sunday in NY
+    assert not xs.weekend(us(2026, 10, 31, 0)) and not xs.weekend(us(2026, 11, 2, 12))
+    none = {"/price-data": {"quote": None}}
+    for t in (us(2026, 10, 30, 12), us(2026, 10, 31, 0)):
+        assert "quotes" not in run(now=t + 40_000_000)["errors"]
+    for t in (us(2026, 10, 31, 12), us(2026, 11, 1, 0), us(2026, 11, 1, 12), us(2026, 11, 2, 0)):
+        doc = run(fetch=fetcher(none), now=t + 40_000_000)
+        assert "quotes" not in doc["errors"] and "weekend" in doc["notes"]["quotes"]
+    doc = run(now=us(2026, 11, 2, 12, 0, 40))
+    assert "notes" not in doc and doc["tables"]["quotes"]["gaps"] == 0 and doc["tables"]["quotes"]["rows"] == 3
+    doc = run(fetch=fetcher(none), now=us(2026, 11, 3, 0, 0, 40))                     # a weekday: still an error
+    assert "no quote" in doc["errors"]["quotes"] and "notes" not in doc
+    doc = run(now=us(2026, 11, 3, 12, 0, 40))
+    assert doc["tables"]["quotes"]["gaps"] == 1                                         # Tuesday 00:00 is missing
+
+
 def test_an_error_page_fails_its_part_only():
     page = fx("error_page.html")
     doc = run(fetch=fetcher({"/proof-of-reserves/": page, "/oracles/": {"error": "Unexpected server error"}}))

@@ -82,6 +82,28 @@ def test_gaps_count_missing_steps_and_weekends_optionally():
     assert pit.gaps(days, D, us(2026, 10, 26, 23), weekdays_only=True) == 0
 
 
+
+def test_gaps_of_groups_are_the_missing_steps_of_any_group_each_once(monkeypatch):
+    # 2026-11-02 09 UTC: one restart hour missing for all 33 coins was 33 gaps (a red feed row); it is one
+    now = us(2026, 10, 26, 12)
+    rows = [{"coin": c, "ts_us": now - k * H} for c in ("BTC", "ETH", "SOL") for k in range(48)
+            if k != 5 and not (c == "ETH" and k == 7)]
+    df = pl.DataFrame(rows)
+    monkeypatch.setattr(pit, "read", lambda source, table: df)
+    assert pit.table_health("hyperliquid", "ctx", [], H, now, by="coin")["gaps"] == 2     # hour 5 once, ETH's 7
+    assert pit.table_health("hyperliquid", "ctx", [], H, now)["gaps"] == 1                # one table: hour 5
+    assert pit.missing_steps([now - k * H for k in range(5) if k != 2], H, now) == {(now - 2 * H) // H}
+
+
+def test_weekdays_only_at_an_offset_leaves_out_new_yorks_weekend():
+    S = 12 * H
+    steps = [us(2026, 10, 30, 12), us(2026, 10, 31, 0), us(2026, 11, 1, 0), us(2026, 11, 3, 0)]
+    now = us(2026, 11, 3, 1)
+    # missing: Sat 31 12:00, Sun 1 12:00, Mon 2 00:00 and Mon 2 12:00 UTC
+    assert pit.gaps(steps, S, now) == 4
+    assert pit.gaps(steps, S, now, weekdays_only=True) == 2                 # UTC: Sat 12:00 and Sun 12:00 out
+    assert pit.gaps(steps, S, now, weekdays_only=True, tz_hours=-5) == 1    # New York: Mon 00:00 UTC is Sunday there
+
 # ---------------------------------------------------------------- Deribit
 
 def test_surface_row_on_a_recorded_btc_book():

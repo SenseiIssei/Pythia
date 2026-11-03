@@ -66,6 +66,8 @@ LIVE_LAG_US = 30 * pit.HOUR_US
 PUBLISH_US = pit.HOUR_US
 CLOSE_KNOWN_US = 21 * pit.HOUR_US        # a US close of day d is known from d 21:00 UTC (16:00 New York in winter)
 STEP_US = 12 * pit.HOUR_US               # two runs a day
+NY_HOURS = -5                            # New York's offset for the weekend (its summer hour aside): the steps of a
+                                         # Saturday or Sunday there have no quote (Sat 12:00 to Mon 00:00 UTC)
 SNAPSHOT_JSON = Path(__file__).resolve().parents[2] / "results" / "smallaccount_s2_snapshot.json"
 DEFAULT = {"SPYx": ("SPY", "SPY")}       # symbol: (S2's key, underlying), when the snapshot cannot be read
 TRIAL = {"id": "small:t10:xstocks_premium", "family": "small", "n": 1, "sharpe": None, "var": None,
@@ -234,6 +236,11 @@ def _pages(fetch: pit.Fetch, url: str, symbol: str) -> list[dict]:
     return rows
 
 
+def weekend(t_us: int) -> bool:
+    """A Saturday or Sunday in New York (NY_HOURS): xStocks gives no quote then."""
+    return datetime.fromtimestamp(t_us / 1e6 + NY_HOURS * 3600, pit.UTC).weekday() >= 5
+
+
 def run(dry: bool = False, fetch: pit.Fetch | None = None, now: int | None = None,
         syms: dict[str, tuple[str, str]] | None = None, closes: dict | None = None, register: bool = True) -> dict:
     fetch = fetch or pit.paced(0.5)
@@ -286,9 +293,17 @@ def run(dry: bool = False, fetch: pit.Fetch | None = None, now: int | None = Non
 
     for name, fn in (("quotes", quotes), ("reserves", reserves), ("oracles", oracles), ("actions", actions)):
         pit.step(errors, name, fn)
-    tables = {t: pit.table_health(SOURCE, t, c, STEP_US, now, by="symbol")
-              for t, c in (("quotes", QUOTE_COLS), ("reserves", RES_COLS))}
-    doc = pit.write_health(SOURCE, tables, errors, dry)
+    notes = {}
+    if "quotes" in errors and weekend(now) and all(
+            "no quote" in x for x in str(errors["quotes"]).split("; ")):
+        notes["quotes"] = "no quote on the US weekend (expected, not an error)"   # 2026-11-03: red every weekend
+        del errors["quotes"]
+        print(f"  quotes: {notes['quotes']}", flush=True)
+    # The quotes skip the US weekend's steps; reserves and the rest are answered then too.
+    tables = {"quotes": pit.table_health(SOURCE, "quotes", QUOTE_COLS, STEP_US, now, by="symbol",
+                                         weekdays_only=True, tz_hours=NY_HOURS),
+              "reserves": pit.table_health(SOURCE, "reserves", RES_COLS, STEP_US, now, by="symbol")}
+    doc = pit.write_health(SOURCE, tables, errors, dry, notes=notes)
     if not dry:
         try:
             report(syms, now, closes=closes, register_trial=register)
