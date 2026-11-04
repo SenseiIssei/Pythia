@@ -863,8 +863,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--card", action="store_true", help="post the daily card here (normally the retrain does)")
     ap.add_argument("--window", type=int, default=WINDOW_DAYS)
+    ap.add_argument("--sequential", action="store_true",
+                    help="model half after the replay instead of in a second process (about half the peak memory, longer)")
     a = ap.parse_args(argv)
-    res = run(window=a.window)
+    res = run(window=a.window, parallel=not a.sequential)
     if res.get("empty"):
         print(f"{NAME}: nothing recorded yet")
         return 1

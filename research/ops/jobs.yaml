@@ -1207,13 +1207,16 @@ jobs:
   # until the factory at 01:00; the study and the retrain after it hold it, so nothing heavy runs beside them.
   - name: pumpfun-rt-study
     description: real-time pump.fun lab, PAPER, daily; 22 rules and the pipeline strategies replayed, the bar, live readiness, capture, decision rows, X14 early/exit rows and Y9 select rows for the retrain
-    schedule: "15 13 * * *"
-    command: python -m lab.pumpfun_rt.study
+    # 2026-11-04: 03:30 and --sequential. At 13:15 the run met the day's builds and bots and was killed on a full
+    # server five times in a row (exit 137, once by earlyoom on 11-04); sequential halves the peak, the night is quiet
+    schedule: "30 3 * * *"
+    command: python -m lab.pumpfun_rt.study --sequential
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 2, memory: 8g}
     # 4h again (2026-10-29): the runtime grew 2,676 to 12,943 s in a week while the record filled up to its 14 days
     # (the 8h stopgap); now the model-free part of pass 2 replays while a second process runs pass 1 and the model half
-    timeout: 4h
+    # sequential (2026-11-04) runs both one after the other, so 6h
+    timeout: 6h
     lock: [pumpfun-rt, heavy]
     lock_wait: 1h
 
