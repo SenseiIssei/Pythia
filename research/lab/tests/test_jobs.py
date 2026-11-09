@@ -1261,3 +1261,16 @@ def test_the_books_before_exec_dryrun_get_the_heavy_lock(day):
     out = replay_heavy_night(t, day, {**STUDY_NIGHTS[day], **BOOKS}, since=12, hours=8)
     assert all(out.get(b) == "ok" for b in BOOKS), out
     assert set(out.values()) == {"ok"}, out
+
+
+# exit-shadow has no schedule, it runs after paper-families under the heavy lock. From 2026-11-05 paper-families
+# skipped (lock heavy busy, the study above), so exit-shadow never started and was not green for 5 days (no run
+# record at all; last ok 11-04, 5 s). The same nights replayed: it must get the lock after paper-families.
+@pytest.mark.parametrize("day", sorted(STUDY_NIGHTS))
+def test_exit_shadow_runs_after_paper_families_on_the_study_nights(day):
+    t = jobs.load_table(REPO_TABLE)
+    j = t.job("exit-shadow")
+    assert j["cron"] is None and "paper-families" in j["depends_on"] and "heavy" in j["locks"]
+    out = replay_heavy_night(t, day, {**STUDY_NIGHTS[day], **BOOKS, "exit-shadow": 5}, since=12, hours=8)
+    assert out.get("paper-families") == "ok" and out.get("exit-shadow") == "ok", out
+    assert set(out.values()) == {"ok"}, out
