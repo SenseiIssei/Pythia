@@ -1330,3 +1330,21 @@ def test_paper_gets_the_heavy_lock_on_the_study_nights(day):
     assert out.get("paper") == "ok", out
     assert set(out.values()) == {"ok"}, out
     assert "paper-review" in [n["name"] for n in t.chained_after("paper")]
+
+
+# paper-families (04:15, heavy lock, 2 h lock_wait) skipped every night from 2026-11-05 to 11-08 (lock heavy busy,
+# skipped at 06:15): pumpfun-rt-study at 03:30 held the lock to 07:11 to 07:28. Not green for 5 days (last ok 11-04,
+# 54 s). The four nights replayed with paper (04:00) and paper-tranches-filtered (04:25) around it: paper-families
+# gets the lock in time and its dependents follow it. What it runs and its schedule, timeout and wait unchanged.
+@pytest.mark.parametrize("day", sorted(PAPER_NIGHTS))
+def test_paper_families_gets_the_heavy_lock_on_the_study_nights(day):
+    t = jobs.load_table(REPO_TABLE)
+    j = t.job("paper-families")
+    assert j["command"] == "python -m lab.paper.families" and "heavy" in j["locks"]
+    assert j["timeout_s"] == 3600 and j["lock_wait_s"] == 7200
+    d0 = datetime.fromisoformat(day).replace(tzinfo=UTC)
+    assert j["cron"].next_after(d0) == d0 + timedelta(hours=4, minutes=15)
+    out = replay_heavy_night(t, day, {**PAPER_NIGHTS[day], **BOOKS}, since=12, hours=8)
+    assert out.get("paper-families") == "ok", out
+    assert set(out.values()) == {"ok"}, out
+    assert {"paper-live-copy", "exit-shadow"} <= {n["name"] for n in t.chained_after("paper-families")}
