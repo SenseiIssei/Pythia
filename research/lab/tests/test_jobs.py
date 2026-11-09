@@ -1408,3 +1408,20 @@ def test_paper_m4_gets_the_heavy_lock_on_the_study_nights(day):
     out = replay_heavy_night(t, day, {**PAPER_NIGHTS[day], **MORNING}, since=12, hours=8, last="paper-m4")
     assert out.get("paper-m4") == "ok", out
     assert set(out.values()) == {"ok"}, out
+
+
+# paper-m4-perps (05:15, heavy lock, 2 h lock_wait) skipped every night from 2026-11-05 to 11-08 (lock heavy busy,
+# skipped at 07:15): pumpfun-rt-study at 03:30 held the lock to 07:11 to 07:28 and the jobs waiting before it took it
+# next. Not green for 5 days (last ok 11-04, 54 s). The four nights replayed with the morning's heavy jobs and the job
+# losing every race for the lock: it gets it in time. What it runs and its schedule, timeout and wait unchanged.
+@pytest.mark.parametrize("day", sorted(PAPER_NIGHTS))
+def test_paper_m4_perps_gets_the_heavy_lock_on_the_study_nights(day):
+    t = jobs.load_table(REPO_TABLE)
+    j = t.job("paper-m4-perps")
+    assert j["command"] == "python -m lab.paper.m4_perps" and "heavy" in j["locks"]
+    assert j["timeout_s"] == 3600 and j["lock_wait_s"] == 7200
+    d0 = datetime.fromisoformat(day).replace(tzinfo=UTC)
+    assert j["cron"].next_after(d0) == d0 + timedelta(hours=5, minutes=15)
+    out = replay_heavy_night(t, day, {**PAPER_NIGHTS[day], **MORNING}, since=12, hours=8, last="paper-m4-perps")
+    assert out.get("paper-m4-perps") == "ok", out
+    assert set(out.values()) == {"ok"}, out
