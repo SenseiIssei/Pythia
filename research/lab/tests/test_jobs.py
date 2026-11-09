@@ -1195,8 +1195,9 @@ HEAVY_NIGHTS = {
 
 
 def replay_heavy_night(t: jobs.Table, day: str, hold: dict[str, int], since: int = 0,
-                       hours: int = 5) -> dict[str, str]:
-    # since: hours before midnight the replay starts; a held job's chained dependents (no schedule) fire at its end
+                       hours: int = 5, last: str | None = None) -> dict[str, str]:
+    # since: hours before midnight the replay starts; a held job's chained dependents (no schedule) fire at its end.
+    # last: flock is not fair, this job loses the lock to every other job waiting when it is freed (the worst case)
     d0 = datetime.fromisoformat(day).replace(tzinfo=UTC)
     fires = []
     for j in t.jobs.values():
@@ -1211,6 +1212,8 @@ def replay_heavy_night(t: jobs.Table, day: str, hold: dict[str, int], since: int
     free, out = d0 - timedelta(hours=since), {}
     while fires:
         f, name = heapq.heappop(fires)
+        if name == last and fires and fires[0][0] <= max(f, free):
+            f, name = heapq.heapreplace(fires, (f, name))
         j = t.job(name)
         start = max(f, free)
         if (start - f).total_seconds() > j["lock_wait_s"]:
@@ -1348,3 +1351,27 @@ def test_paper_families_gets_the_heavy_lock_on_the_study_nights(day):
     assert out.get("paper-families") == "ok", out
     assert set(out.values()) == {"ok"}, out
     assert {"paper-live-copy", "exit-shadow"} <= {n["name"] for n in t.chained_after("paper-families")}
+
+
+# paper-funding-carry (05:45, heavy lock, 2 h lock_wait) skipped every night from 2026-11-05 to 11-08 (lock heavy busy,
+# skipped at 07:45): pumpfun-rt-study at 03:30 held the lock to 07:11 to 07:28, and at its end the lock went first to
+# the books waiting with it (paper-perps-neutral, paper-m4-hl-small) and the retrain, which held it to 07:44 to 08:20.
+# Not green for 5 days (last ok 11-04, 40 s). The four nights replayed with the morning's heavy jobs (their 11-04 and
+# Sunday 11-01 run times) and the job losing every race for the lock: it gets it in time. What it runs and its
+# schedule, timeout and wait unchanged.
+MORNING = {**BOOKS, "paper-m4": 56, "paper-m4-perps": 58, "paper-ls": 82, "paper-funding-carry": 40,
+           "paper-m4-hl-small": 33, "paper-perps-neutral": 44, "learn": 10, "dexscreener-study": 8,
+           "retrain": 330, "costs": 87, "leak-check": 211}
+
+
+@pytest.mark.parametrize("day", sorted(PAPER_NIGHTS))
+def test_paper_funding_carry_gets_the_heavy_lock_on_the_study_nights(day):
+    t = jobs.load_table(REPO_TABLE)
+    j = t.job("paper-funding-carry")
+    assert j["command"] == "python -m lab.paper.funding_carry" and "heavy" in j["locks"]
+    assert j["timeout_s"] == 3600 and j["lock_wait_s"] == 7200
+    d0 = datetime.fromisoformat(day).replace(tzinfo=UTC)
+    assert j["cron"].next_after(d0) == d0 + timedelta(hours=5, minutes=45)
+    out = replay_heavy_night(t, day, {**PAPER_NIGHTS[day], **MORNING}, since=12, hours=8, last="paper-funding-carry")
+    assert out.get("paper-funding-carry") == "ok", out
+    assert set(out.values()) == {"ok"}, out
