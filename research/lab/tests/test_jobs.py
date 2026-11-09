@@ -6,6 +6,7 @@ Run from research/lab:  python -m pytest tests/test_jobs.py
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import shutil
@@ -1193,19 +1194,23 @@ HEAVY_NIGHTS = {
 }
 
 
-def replay_heavy_night(t: jobs.Table, day: str, hold: dict[str, int]) -> dict[str, str]:
+def replay_heavy_night(t: jobs.Table, day: str, hold: dict[str, int], since: int = 0,
+                       hours: int = 5) -> dict[str, str]:
+    # since: hours before midnight the replay starts; a held job's chained dependents (no schedule) fire at its end
     d0 = datetime.fromisoformat(day).replace(tzinfo=UTC)
     fires = []
     for j in t.jobs.values():
         if "heavy" not in j["locks"] or not j["enabled"] or j["cron"] is None or \
                 (j["name"] not in hold and j["name"] != "features"):
             continue
-        f = j["cron"].next_after(d0 - timedelta(minutes=1))
-        while f and f < d0 + timedelta(hours=5):
+        f = j["cron"].next_after(d0 - timedelta(hours=since, minutes=1))
+        while f and f < d0 + timedelta(hours=hours):
             fires.append((f, j["name"]))
             f = j["cron"].next_after(f)
-    free, out = d0, {}
-    for f, name in sorted(fires):
+    heapq.heapify(fires)
+    free, out = d0 - timedelta(hours=since), {}
+    while fires:
+        f, name = heapq.heappop(fires)
         j = t.job(name)
         start = max(f, free)
         if (start - f).total_seconds() > j["lock_wait_s"]:
@@ -1213,6 +1218,9 @@ def replay_heavy_night(t: jobs.Table, day: str, hold: dict[str, int]) -> dict[st
             continue
         free = start + timedelta(seconds=hold.get(name, j["timeout_s"]))
         out[name] = "ok"
+        for d in t.jobs.values():
+            if name in d["depends_on"] and d["name"] in hold and d["cron"] is None and "heavy" in d["locks"]:
+                heapq.heappush(fires, (free, d["name"]))
     return out
 
 
@@ -1223,4 +1231,33 @@ def test_features_gets_the_heavy_lock_on_the_nights_it_skipped(day):
     t = jobs.load_table(REPO_TABLE)
     out = replay_heavy_night(t, day, HEAVY_NIGHTS[day])
     assert out.get("features") == "ok", out
+    assert set(out.values()) == {"ok"}, out
+
+
+# 2026-11-05 to 11-08: pumpfun-rt-study at 03:30 (since 83042b5) held the heavy lock 3.7 to 4 h, the retrain after
+# it another 0.5 to 0.9 h; paper (04:00), paper-families (04:15) and paper-tranches-filtered (04:25) waited their 2 h
+# and skipped every night, so exec-dryrun, after them, was blocked from 11-05 on. Hold times from the run records;
+# the replay starts at 12:00 the day before (the study and its retrain run in the evening).
+STUDY_NIGHTS = {
+    "2026-11-05": {"pumpfun-rt-study": 14270, "pumpfun-rt-retrain": 3150, "pumpfun-factory": 5073,
+                   "factory-small": 24, "backfill": 540},
+    "2026-11-06": {"pumpfun-rt-study": 13845, "pumpfun-rt-retrain": 2582, "pumpfun-factory": 5072,
+                   "factory-small": 22, "backfill": 551},
+    "2026-11-08": {"pumpfun-rt-study": 13262, "pumpfun-rt-retrain": 2011, "pumpfun-factory": 5011,
+                   "factory-small": 27, "backfill": 551},
+}
+BOOKS = {"paper": 26, "paper-families": 54, "paper-tranches-filtered": 22}  # 2026-11-04
+
+
+@pytest.mark.parametrize("day", sorted(STUDY_NIGHTS))
+def test_the_books_before_exec_dryrun_get_the_heavy_lock(day):
+    t = jobs.load_table(REPO_TABLE)
+    up, todo = set(), ["exec-dryrun"]
+    while todo:
+        new = set(t.job(todo.pop())["depends_on"]) - up
+        up |= new
+        todo += new
+    assert set(BOOKS) <= up
+    out = replay_heavy_night(t, day, {**STUDY_NIGHTS[day], **BOOKS}, since=12, hours=8)
+    assert all(out.get(b) == "ok" for b in BOOKS), out
     assert set(out.values()) == {"ok"}, out

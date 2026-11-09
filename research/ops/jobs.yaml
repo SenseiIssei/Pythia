@@ -1208,8 +1208,12 @@ jobs:
   - name: pumpfun-rt-study
     description: real-time pump.fun lab, PAPER, daily; 22 rules and the pipeline strategies replayed, the bar, live readiness, capture, decision rows, X14 early/exit rows and Y9 select rows for the retrain
     # 2026-11-04: 03:30 and --sequential. At 13:15 the run met the day's builds and bots and was killed on a full
-    # server five times in a row (exit 137, once by earlyoom on 11-04); sequential halves the peak, the night is quiet
-    schedule: "30 3 * * *"
+    # server five times in a row (exit 137, once by earlyoom on 11-04); sequential halves the peak.
+    # 18:30 since 2026-11-09: at 03:30 it held the heavy lock 3.7 to 4 h (to 07:30), so paper, paper-families and
+    # paper-tranches-filtered (04:00 to 04:25, 2 h lock_wait) skipped every night from 11-05 and exec-dryrun was
+    # blocked. From 18:30 study and retrain end near 23:20, before features (00:20) and the factory (01:00); the
+    # evening runs no heavy job and no lab job above 4 GB.
+    schedule: "30 18 * * *"
     command: python -m lab.pumpfun_rt.study --sequential
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 2, memory: 8g}
