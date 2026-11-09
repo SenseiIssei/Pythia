@@ -1274,3 +1274,16 @@ def test_exit_shadow_runs_after_paper_families_on_the_study_nights(day):
     out = replay_heavy_night(t, day, {**STUDY_NIGHTS[day], **BOOKS, "exit-shadow": 5}, since=12, hours=8)
     assert out.get("paper-families") == "ok" and out.get("exit-shadow") == "ok", out
     assert set(out.values()) == {"ok"}, out
+
+
+# onchain-longterm has no schedule either, it runs after paper-families under the heavy and onchain locks. From
+# 2026-11-05 paper-families skipped (lock heavy busy, the study above), so it never started and was not green for 5
+# days (no run record; last ok 11-04, 4 s). The same nights replayed: it must get the lock after paper-families.
+@pytest.mark.parametrize("day", sorted(STUDY_NIGHTS))
+def test_onchain_longterm_runs_after_paper_families_on_the_study_nights(day):
+    t = jobs.load_table(REPO_TABLE)
+    j = t.job("onchain-longterm")
+    assert j["cron"] is None and "paper-families" in j["depends_on"] and "heavy" in j["locks"]
+    out = replay_heavy_night(t, day, {**STUDY_NIGHTS[day], **BOOKS, "onchain-longterm": 4}, since=12, hours=8)
+    assert out.get("paper-families") == "ok" and out.get("onchain-longterm") == "ok", out
+    assert set(out.values()) == {"ok"}, out
