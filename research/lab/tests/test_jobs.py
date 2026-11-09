@@ -1375,3 +1375,19 @@ def test_paper_funding_carry_gets_the_heavy_lock_on_the_study_nights(day):
     out = replay_heavy_night(t, day, {**PAPER_NIGHTS[day], **MORNING}, since=12, hours=8, last="paper-funding-carry")
     assert out.get("paper-funding-carry") == "ok", out
     assert set(out.values()) == {"ok"}, out
+
+
+# paper-live-copy has no schedule and no heavy lock: it runs after paper-families (run_job chains through
+# chained_after). From 2026-11-05 paper-families skipped (lock heavy busy, skipped at 06:15; the study above), so
+# paper-live-copy never started and was not green for 5 days (no run record; last ok 11-04, 1 s). The four nights
+# replayed: paper-families gets the lock and paper-live-copy follows it. What it runs and its timeout unchanged.
+@pytest.mark.parametrize("day", sorted(PAPER_NIGHTS))
+def test_paper_live_copy_runs_after_paper_families_on_the_study_nights(day):
+    t = jobs.load_table(REPO_TABLE)
+    j = t.job("paper-live-copy")
+    assert j["command"] == "python -m lab.paper.live_copy" and j["timeout_s"] == 300
+    assert j["cron"] is None and j["depends_on"] == ["paper-families"] and "heavy" not in j["locks"]
+    out = replay_heavy_night(t, day, {**PAPER_NIGHTS[day], **BOOKS}, since=12, hours=8)
+    assert out.get("paper-families") == "ok", out
+    assert set(out.values()) == {"ok"}, out
+    assert "paper-live-copy" in [n["name"] for n in t.chained_after("paper-families") if n["enabled"]]
