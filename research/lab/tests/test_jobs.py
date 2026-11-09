@@ -1287,3 +1287,24 @@ def test_onchain_longterm_runs_after_paper_families_on_the_study_nights(day):
     out = replay_heavy_night(t, day, {**STUDY_NIGHTS[day], **BOOKS, "onchain-longterm": 4}, since=12, hours=8)
     assert out.get("paper-families") == "ok" and out.get("onchain-longterm") == "ok", out
     assert set(out.values()) == {"ok"}, out
+
+
+# onchain-paper has no schedule and no heavy lock: it runs after paper-live-copy, which runs after paper-families
+# (run_job chains depth first through chained_after). From 2026-11-05 paper-families skipped (lock heavy busy, the
+# study above), so neither ever started and onchain-paper was not green for 5 days (no run record; last ok 11-04,
+# 62 s). The same nights replayed: paper-families gets the lock and its chain reaches onchain-paper.
+@pytest.mark.parametrize("day", sorted(STUDY_NIGHTS))
+def test_onchain_paper_runs_after_paper_families_on_the_study_nights(day):
+    t = jobs.load_table(REPO_TABLE)
+    j = t.job("onchain-paper")
+    assert j["cron"] is None and j["depends_on"] == ["paper-live-copy"] and "onchain" in j["locks"]
+    assert t.job("paper-live-copy")["depends_on"] == ["paper-families"]
+    out = replay_heavy_night(t, day, {**STUDY_NIGHTS[day], **BOOKS}, since=12, hours=8)
+    assert set(out.values()) == {"ok"}, out
+    ran, todo = set(), [n for n, s in out.items() if s == "ok"]
+    while todo:
+        for nxt in t.chained_after(todo.pop()):
+            if nxt["enabled"] and nxt["name"] not in ran:
+                ran.add(nxt["name"])
+                todo.append(nxt["name"])
+    assert {"paper-live-copy", "onchain-paper"} <= ran, sorted(ran)
