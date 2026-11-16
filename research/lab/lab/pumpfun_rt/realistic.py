@@ -46,6 +46,10 @@ refused when the wallet cannot pay stake, reserve and rent) with the live sizing
 The daily job writes their wallets in EUR, trades, mean and median per trade after all costs, the bootstrap band,
 days and the gate for real money into realistic.md (`ten`); the readiness ladder shows them.
 
+The pool state fix (results/pumpfun_pool_state_fix.md): the shadow fills on the newest pool state by slot
+(sim.Engine(fresh_pool=True)); the ledger rows of the restated books that filled on a stale one before it (STALE_PATH,
+stale) are skipped and counted by P3's, R2's and E1's tables and the ladder, as P1's tainted rows.
+
 The old books run on as `<name>_ideal` twins until IDEAL_UNTIL (two weeks), then go. The calibration line compares
 the live bot with the realistic paper twin P_pool0_wait on the same coins (entry and exit price, P&L in points);
 calibrated when the median P&L difference per matched trade is within CALIB_POINTS over 7 full days. Nothing here
@@ -772,10 +776,12 @@ def sol_eur() -> float | None:
         return None
 
 
-def small_status(state: dict | None, eur: float | None, small=None, taint: dict | None = None) -> list[dict]:
+def small_status(state: dict | None, eur: float | None, small=None, taint: dict | None = None,
+                 stale_: dict | None = None) -> list[dict]:
     """The small-wallet books' paper wallets from the collector's state.json: what each holds (its start, top-ups
     included, and every realised result; open positions at their cost), in SOL and euro, its P&L, trades, top-ups;
-    less the book's tainted trades (P1, taint_by_book), whose count is `tainted`."""
+    less the book's tainted trades (P1, taint_by_book), whose count is `tainted`, and its stale ones (stale_by_book),
+    `stale`."""
     pw = (state or {}).get("paper_wallets") or {}
     out = []
     for name, base, share, max_open, brake in (SMALL if small is None else small):
@@ -784,7 +790,7 @@ def small_status(state: dict | None, eur: float | None, small=None, taint: dict 
         out.append({"book": name, "strategy": base, "share": share, "max_open": max_open, "brake": brake,
                     "sol": sol, "eur": sol * eur if eur else None, "pnl_sol": w.pnl_l / C.LAMPORTS if w else 0.0,
                     "trades": w.n if w else 0, "refills": w.refills if w else 0, "started": w is not None})
-    return [less_taint(r, taint, eur) for r in out]
+    return [less_stale(less_taint(r, taint, eur), stale_, eur) for r in out]
 
 
 def small_md(rows: list[dict], eur: float | None) -> list[str]:
@@ -799,7 +805,7 @@ def small_md(rows: list[dict], eur: float | None) -> list[str]:
         md.append(f"| {r['book']} | {r['strategy']} | {r['share'] * 100:g} % | {r['max_open']} | "
                   f"{'on' if r['brake'] else 'off'} | {r['sol']:.3f} | {eur_} | {r['pnl_sol']:+.3f} | {r['trades']} | "
                   f"{r['refills']} |")
-    return md + taint_note(rows) + [""]
+    return md + taint_note(rows) + stale_note(rows) + [""]
 
 
 def ten_trials(ten=None) -> list[dict]:
@@ -831,11 +837,12 @@ def ten_stats(rows: list[dict], fails: list[dict]) -> dict:
 
 
 def ten_status(state: dict | None, ledger: list[dict], failed: list[dict], eur: float | None, gap: dict | None,
-               now_ms: int, ten=None) -> list[dict]:
+               now_ms: int, ten=None, skip_stale: bool = True) -> list[dict]:
     """P3's books: the wallet from state.json (start and every realised result, open positions at cost and held rent
-    counted as the wallet's, less tainted trades) in SOL and euro, ten_stats on the ledger without restart and
-    tainted rows (P1), the days since the start, whether it can still pay a trade, and the gate for real money
-    (TEN_DAYS days, mean and band's lower end above 0, P2's `gap` passing, P1 out)."""
+    counted as the wallet's, less tainted trades and, with skip_stale, the stale ones) in SOL and euro, ten_stats on the
+    ledger without restart, tainted rows (P1) and stale rows (the pool state fix), the days since the start, whether
+    it can still pay a trade, and the gate for real money (TEN_DAYS days, mean and band's lower end above 0, P2's
+    `gap` passing, P1 out)."""
     pw = (state or {}).get("paper_wallets") or {}
     need = int(Z.MIN_STAKE_SOL * (1 + C.SLIP_TOL) * C.LAMPORTS) + int(RESERVE_SOL * C.LAMPORTS) + RENT_L
     out = []
@@ -843,16 +850,19 @@ def ten_status(state: dict | None, ledger: list[dict], failed: list[dict], eur: 
         w = TenWallet.from_json(pw.get(name)) if name in pw else None
         mine = [r for r in ledger if r.get("rule") == name and r.get("exit_why") != "restart"]
         n_t, s_t = taint_by_book(mine).get(name, (0, 0.0))
-        st = ten_stats([r for r in mine if not tainted(r)], [x for x in failed if x.get("rule") == name])
-        sol = ((w.start_l + w.pnl_l) / C.LAMPORTS if w is not None else TEN_SOL) - s_t
+        n_s, s_s = stale_by_book(mine).get(name, (0, 0.0)) if skip_stale else (0, 0.0)
+        st = ten_stats([r for r in mine if not tainted(r) and not (skip_stale and stale(r))],
+                       [x for x in failed if x.get("rule") == name])
+        sol = ((w.start_l + w.pnl_l) / C.LAMPORTS if w is not None else TEN_SOL) - s_t - s_s
         days = (now_ms - w.since_ms) / DAY_MS if w is not None and w.since_ms else 0.0
         gate = {"days": days >= TEN_DAYS, "mean": st["mean"] is not None and st["mean"] > 0,
                 "band": st["band"] is not None and st["band"][0] > 0, "gap": (gap or {}).get("pass") is True,
                 "taint": True}
         out.append({"book": name, "strategy": base, "start_sol": TEN_SOL, "sol": sol, "eur": sol * eur if eur else None,
-                    "pnl_sol": (w.pnl_l / C.LAMPORTS if w is not None else 0.0) - s_t, **st, "days": days,
+                    "pnl_sol": (w.pnl_l / C.LAMPORTS if w is not None else 0.0) - s_t - s_s, **st, "days": days,
                     "since_ms": w.since_ms if w is not None else None, "rent_lost": w.rent_lost if w else 0,
-                    "can_pay": sol * C.LAMPORTS >= need, "tainted": n_t, "tainted_sol": s_t,
+                    "can_pay": sol * C.LAMPORTS >= need, "tainted": n_t, "tainted_sol": s_t, "stale": n_s,
+                    "stale_sol": s_s,
                     "gap_pts": (gap or {}).get("pts"), "gate": gate, "pass": all(gate.values()),
                     "started": w is not None})
     return out
@@ -888,7 +898,7 @@ def ten_md(rows: list[dict], eur: float | None) -> list[str]:
         md.append(f"| {r['book']} | {r['sol']:.4f}{'' if r['can_pay'] else ' (cannot pay a trade)'} | {eur_} | "
                   f"{r['trades']} | {pc(r['mean'])} | {pc(r['median'])} | {band} | {r['days']:.1f} | "
                   f"{ten_gate_text(r)} |")
-    return md + taint_note(rows) + [""]
+    return md + taint_note(rows) + stale_note(rows) + [""]
 
 
 def taint_note(rows: list[dict]) -> list[str]:
@@ -955,6 +965,65 @@ def less_taint(row: dict, taint: dict | None, eur: float | None) -> dict:
         out.update(sol=row["sol"] - s, pnl_sol=row["pnl_sol"] - s, trades=max(0, row["trades"] - n))
         out["eur"] = out["sol"] * eur if eur else None
     return out
+
+
+# ---------------------------------------------------------------- G1's stale pool state: rows the fix restates
+
+STALE_PATH = Path(__file__).resolve().parents[2] / "results" / "pumpfun_pool_state_fix_rows.json"
+STALE_NOTE = "results/pumpfun_pool_state_fix.md"
+STALE_KEYS: frozenset | None = None                  # read once from STALE_PATH
+
+
+def stale_key(r: dict) -> str:
+    """A ledger row's key in STALE_PATH: a hash of its book, coin and signal time (no address in the file)."""
+    sig = _f(r.get("signal_ms"))
+    raw = f"{r.get('rule') or ''}|{r.get('mint') or ''}|{int(sig) if sig is not None else ''}"
+    return hashlib.blake2b(raw.encode(), digest_size=8).hexdigest()
+
+
+def stale_keys() -> frozenset:
+    global STALE_KEYS
+    if STALE_KEYS is None:
+        d = read_json(STALE_PATH)
+        STALE_KEYS = frozenset((d or {}).get("keys") or []) if isinstance(d, dict) else frozenset()
+    return STALE_KEYS
+
+
+def stale(r: dict) -> bool:
+    """results/pumpfun_pool_state_fix_prereg.md: a paper ledger row of a restated book that filled on a stale pool
+    state (G1: sim.Engine.pool_state dropped a pool read of a later slot once the stream gave a pool trade;
+    reconcile_g1.stale_fill), listed in STALE_PATH from the study's run. The shadow fills on the newest state since
+    the fix (sim.Engine(fresh_pool=True)). Nothing rewrites the ledger; the readers of these books skip these rows
+    and count them, as P1's."""
+    keys = stale_keys()
+    return bool(keys) and stale_key(r) in keys
+
+
+def stale_by_book(rows) -> dict[str, tuple[int, float]]:
+    """{book: (stale closed trades not P1-tainted, their P&L in SOL)} of a paper ledger."""
+    out: dict[str, tuple[int, float]] = {}
+    for r in rows:
+        if not tainted(r) and stale(r):
+            n, s = out.get(r.get("rule") or "?", (0, 0.0))
+            out[r.get("rule") or "?"] = (n + 1, s + (_f(r.get("pnl_sol")) or 0.0))
+    return out
+
+
+def less_stale(row: dict, st: dict | None, eur: float | None) -> dict:
+    """less_taint for the stale rows: `stale` and `stale_sol`."""
+    n, s = (st or {}).get(row["book"], (0, 0.0))
+    out = {**row, "stale": n, "stale_sol": s}
+    if n:
+        out.update(sol=row["sol"] - s, pnl_sol=row["pnl_sol"] - s, trades=max(0, row["trades"] - n))
+        out["eur"] = out["sol"] * eur if eur else None
+    return out
+
+
+def stale_note(rows: list[dict]) -> list[str]:
+    """The line under a wallet table: the stale rows left out of it, if any."""
+    n, s = sum(r.get("stale") or 0 for r in rows), sum(r.get("stale_sol") or 0.0 for r in rows)
+    return ["", f"Left out: {n} trades filled on a stale pool state before the fix ({s:+.3f} SOL; "
+                f"{STALE_NOTE})."] if n else []
 
 
 # ---------------------------------------------------------------- calibration
@@ -1054,7 +1123,7 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
     lo = now_ms - CALIB_DAYS * DAY_MS
     start = max(lo, int(since)) if since else now_ms
     paper = read_csv(paper_dir() / "ledger.csv")
-    taint = taint_by_book(paper)
+    taint, stale_ = taint_by_book(paper), stale_by_book(paper)
     cal = calibrate(read_csv(data_dir() / "ledger.csv"), paper, start, now_ms)
     covered = (now_ms - start) / DAY_MS
     word = verdict(cal, covered)
@@ -1062,8 +1131,9 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
     out = {"updated_ms": now_ms, "fit": f.to_json(), "config": LiveConfig.load().to_json(),
            "realistic_since": since, "calibration": cal | {"days": covered, "verdict": word,
                                                            "line": calib_line(cal, word, covered)},
-           "sol_eur": eur, "small": small_status(read_json(paper_dir() / "state.json"), eur, taint=taint),
-           "tainted": sum(n for n, _ in taint.values())}
+           "sol_eur": eur, "small": small_status(read_json(paper_dir() / "state.json"), eur, taint=taint,
+                                                 stale_=stale_),
+           "tainted": sum(n for n, _ in taint.values()), "stale": sum(n for n, _ in stale_.values())}
     try:                                                     # P2: paper minus live on all live signals
         from .selection_p2 import gate
         out["selection"] = gate(data_dir(), paper_dir(), paper)
@@ -1124,6 +1194,8 @@ def markdown(d: dict) -> str:
         *([d["selection"]["line"], ""] if (d.get("selection") or {}).get("line") else []),
         *([f"The paper ledger holds {d['tainted']} trades the late-row bug made before {FIX_DAY}; every reader "
            "skips them (P1, results/pumpfun_ledger_taint_p1.md).", ""] if d.get("tainted") else []),
+        *([f"It holds {d['stale']} trades of the restated books filled on a stale pool state before the fix; the P3, "
+           f"R2 and E1 tables and the ladder skip them ({STALE_NOTE}).", ""] if d.get("stale") else []),
         f"The model every pipeline paper book trades by (lab/pumpfun_rt/realistic.py), fitted "
         f"{datetime.fromtimestamp(d['updated_ms'] / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC from the live bot's "
         f"orders of the last {FIT_DAYS} days ({(f.live or {}).get('buys', 0)} buys, {(f.live or {}).get('sells', 0)} "

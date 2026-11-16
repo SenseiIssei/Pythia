@@ -508,7 +508,8 @@ def p3_gate(c: dict) -> list[dict]:
             cond("p3_band", bool(g.get("band")), "no band (under 10 trades)" if band is None
                  else f"{pc(band[0])} to {pc(band[1])}", p),
             cond("p3_gap", bool(g.get("gap")), "not measured" if pts is None else f"{pts:+.1f} points", p),
-            cond("p3_taint", bool(g.get("taint")), f"{b.get('tainted') or 0} tainted trades left out", p)]
+            cond("p3_taint", bool(g.get("taint")), f"{b.get('tainted') or 0} tainted trades left out"
+                 + (f", {b['stale']} on a stale pool state (the pool state fix)" if b.get("stale") else ""), p)]
 
 
 def execution(c: dict, ctx: dict, now: int) -> list[dict]:
@@ -628,6 +629,8 @@ def judge(c: dict, ctx: dict, now: int) -> dict:
             else "; ".join(COND[x["id"]][1] for x in missing),
             "missing": [x["id"] for x in missing], "open": [x["id"] for x in opened], "evidence": ev,
             "tainted": (ctx["pf"]["rules"][c["name"]]["tainted"] if c["kind"] == "rule" else c.get("tainted")) or 0,
+            "stale": (ctx["pf"]["rules"][c["name"]].get("stale") if c["kind"] == "rule"
+                      else (c.get("p3") or {}).get("stale")) or 0,
             **({"p3": p3_row(c["p3"])} if c.get("p3") else {}),
             **({"eq1": eq1_row(c, ctx)} if c.get("study") == "EQ1" else {}),
             **({"pumpfun": pf_row(c, ctx)} if c["kind"] == "rule" else {}),
@@ -658,18 +661,22 @@ def _rows(p: Path, keep) -> tuple[list[dict], bool]:
         return [], False
 
 
-def pf_entries(rows: list[dict], fails: list[dict], since_ms: int) -> tuple[list[tuple[int, float]], int]:
+def pf_entries(rows: list[dict], fails: list[dict], since_ms: int) -> tuple[list[tuple[int, float]], int, int]:
     """One rule's entries since since_ms in signal order, (signal_ms, return): its closed trades (ret, every cost of
-    the fit in it) less P1's tainted rows and the restart closes, and its failed buys (the fee over the median stake of
-    its trades); and how many tainted rows were left out."""
+    the fit in it) less P1's tainted rows, the pool state fix's stale rows (realistic.stale) and the restart closes,
+    and its failed buys (the fee over the median stake of its trades); and how many tainted and stale rows were left
+    out."""
     from ..pumpfun_rt import realistic as R
-    out, stakes, bad = [], [], 0
+    out, stakes, bad, old = [], [], 0, 0
     for r in rows:
         sig, ret = R._f(r.get("signal_ms")), R._f(r.get("ret"))
         if sig is None or ret is None or sig < since_ms or r.get("exit_why") == "restart":
             continue
         if R.tainted(r):
             bad += 1
+            continue
+        if R.stale(r):
+            old += 1
             continue
         out.append((int(sig), ret))
         stakes.append(R._f(r.get("stake_sol")) or 0.0)
@@ -678,7 +685,7 @@ def pf_entries(rows: list[dict], fails: list[dict], since_ms: int) -> tuple[list
         sig, pnl = R._f(x.get("signal_ms")), R._f(x.get("pnl_sol"))
         if sig is not None and pnl is not None and sig >= since_ms and st > 0:
             out.append((int(sig), pnl / st))
-    return sorted(out), bad
+    return sorted(out), bad, old
 
 
 def pf_record(entries: list[tuple[int, float]], now: int, n_all: int | None, n_fam: int | None,
@@ -775,10 +782,10 @@ def pf_context(root: Path, now: int) -> dict:
         if t is not None and (r["rule"] not in out["first"] or _day(t) < out["first"][r["rule"]]):
             out["first"][r["rule"]] = _day(t)
     for rule, (_, real) in PF_RULES.items():
-        es, bad = pf_entries([r for r in rows if r.get("rule") == rule], [x for x in fails if x.get("rule") == rule],
-                             since) if real else ([], 0)
+        es, bad, old = pf_entries([r for r in rows if r.get("rule") == rule],
+                                  [x for x in fails if x.get("rule") == rule], since) if real else ([], 0, 0)
         out["rules"][rule] = {**pf_record(es, now, n_all, n_fam, sharpes if len(sharpes) >= 2 else None),
-                              "tainted": bad, "realistic": real}
+                              "tainted": bad, "stale": old, "realistic": real}
     return out
 
 
@@ -790,8 +797,9 @@ def pf_tested(c: dict, ctx: dict) -> list[dict]:
     """Step 2 of a pump.fun rule: P1 out, lat 2x above 0, realistic execution, R7's entries and days, both DSRs."""
     pf, p = ctx["pf"], PF_LEDGER
     x = pf["rules"][c["name"]]
-    out = [cond("pf_taint", pf["read"], f"{x['tainted']} tainted rows left out (P1)" if pf["read"] else
-                "no paper ledger", p)]
+    out = [cond("pf_taint", pf["read"], f"{x['tainted']} tainted rows left out (P1)"
+                + (f", {x['stale']} on a stale pool state (the pool state fix)" if x.get("stale") else "")
+                if pf["read"] else "no paper ledger", p)]
     lat = pf["lat2x"].get(c["name"])
     out.append(cond("pf_late", lat is not None and lat > 0, "not in the real-time report" if lat is None else
                     f"{_pc(lat)} a trade at twice the latency (lat 2x, out of sample)", "reports/pumpfun_rt/latest.json"))
@@ -842,7 +850,7 @@ def pf_execution(c: dict, ctx: dict) -> list[dict]:
 def pf_row(c: dict, ctx: dict) -> dict:
     x = ctx["pf"]["rules"][c["name"]]
     return {k: x[k] for k in ("days_record", "entries", "n_eff", "days_traded", "mean", "lo", "hi", "dsr_all",
-                              "dsr_family", "e", "e_fresh", "to_bar", "to_power", "tainted", "realistic")}
+                              "dsr_family", "e", "e_fresh", "to_bar", "to_power", "tainted", "stale", "realistic")}
 
 
 def _days_left(v) -> str:
@@ -855,8 +863,8 @@ def pf_md(rows: list[dict]) -> list[str]:
     if not rows:
         return []
     md = ["", f"pump.fun rules per trade ({PF_PREREG}): the realistic paper record since "
-          f"{_day(PF_REAL_FROM_MS)} 01:43 UTC, P1's tainted rows out; mean per entry with R7's band (clustered by UTC "
-          f"day); DSR per entry over R5 and F3's trials, all / pumpfun (higher is better, pass at {DSR_PASS}); E: T8's "
+          f"{_day(PF_REAL_FROM_MS)} 01:43 UTC, P1's tainted rows and the pool state fix's stale rows out; mean per "
+          f"entry with R7's band (clustered by UTC day); DSR per entry over R5 and F3's trials, all / pumpfun (higher is better, pass at {DSR_PASS}); E: T8's "
           "e-process on the day sums (edge at 20); days still needed at the current mean per entry to step 2's bar "
           "and to T8's power at 0.", "",
           "| rule | step | next missing | days of record | entries (effective) | mean per entry | band | DSR | E | "
@@ -1044,7 +1052,7 @@ def build(root: Path | None = None, now: int | None = None, results: Path = RESU
               "status": "ok" if r["step"] >= 4 else "watch"} for r in rows[:10]]
     return {"title": "Readiness ladder", "status": "watch", "headline": headline, "updated_ms": now, "items": items,
             "generated": _day(now), "steps": STEPS, "counts": counts, "registry": pool,
-            "tainted": sum(r["tainted"] for r in rows),
+            "tainted": sum(r["tainted"] for r in rows), "stale": sum(r.get("stale") or 0 for r in rows),
             "constants": {"dsr_pass": DSR_PASS, "pbo_max": PBO_MAX, "shadow_days": SHADOW_DAYS,
                           "lockbox_bar": LOCKBOX_BAR, "exec_cap_eur": EXEC_CAP_EUR, "exec_days": EXEC_DAYS},
             "promotions": promote_summary(ctx), "rows": rows}
@@ -1111,6 +1119,9 @@ def markdown(d: dict) -> str:
     if d.get("tainted"):
         md.append(f"\nThe pump.fun books' evidence leaves out {d['tainted']} paper trades the late-row bug made (P1, "
                   "results/pumpfun_ledger_taint_p1.md).")
+    if d.get("stale"):
+        md.append(f"\nIt leaves out {d['stale']} paper trades filled on a stale pool state before the fix "
+                  "(results/pumpfun_pool_state_fix.md).")
     return "\n".join(md) + "\n"
 
 

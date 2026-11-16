@@ -76,7 +76,7 @@ class Engine:
                  rule_costs: dict[str, C.Costs] | None = None, strategies: list | None = None,
                  wallets: W.WalletBook | None = None, cats=None, models: dict | None = None, kill=None,
                  early_rows: bool = False, snipers: E.SniperBook | None = None, select: bool = False,
-                 trend: bool = False, social=False):
+                 trend: bool = False, social=False, fresh_pool: bool = False):
         self.rules = list(S.RULES if rules is None else rules)
         self.costs = costs or C.Costs()
         self.rule_costs = rule_costs or {}
@@ -121,6 +121,9 @@ class Engine:
         self.social = social if isinstance(social, SO.Tracker) else (SO.Tracker() if social else None)
         # R2: the realistic labels of the decision and early rows (labels_r2.Labels; the study's second pass)
         self.r2 = None
+        # G1's fix (results/pumpfun_pool_state_fix_prereg.md): a pool read of a later slot than the last pool trade is
+        # the state (the paper books, live.Shadow, and the fix's after run; not the live service or the twin)
+        self.fresh_pool = fresh_pool
 
     def _index_rules(self) -> None:
         """The rules and every pipe's strategies, by entry kind (a strategy signals once for all pipes)."""
@@ -295,12 +298,16 @@ class Engine:
 
     def pool_state(self, t, mint, pool, pb, pq, vq=None, slot=None) -> None:
         """F1 (poolread.py): the pool's reserves read from the chain at its migration. They count only while the
-        stream has given no pool trade yet (a trade's state is as fresh or fresher); a strategy waiting for the
-        state goes on (Pipeline.pool_known). Not a trade: nothing fills, exits or counts as one on it."""
+        stream has given no pool trade yet; with fresh_pool also when the read's slot is later than the last pool
+        trade's (the newest state by slot: G1 found paper buys filled on a trade 81 slots older than the read); a
+        strategy waiting for the state goes on (Pipeline.pool_known). Not a trade: nothing fills, exits or counts
+        as one on it."""
         self.advance(max(t, self.now))
         t = self.now
         tok = self.tokens.get(mint)
-        if tok is None or not pb or not pq or (tok.pool and pool and tok.pool != pool) or (tok.pb and tok.pq):
+        if tok is None or not pb or not pq or (tok.pool and pool and tok.pool != pool):
+            return
+        if tok.pb and tok.pq and not (self.fresh_pool and slot and int(slot) > tok.amm_slot):
             return
         tok.pb, tok.pq = int(pb), C.effective_quote(int(pq), vq)
         if slot:

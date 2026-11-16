@@ -468,11 +468,15 @@ def run_replay(root=None, until_ms: int | None = None, log=print, model: R.Model
 # ---------------------------------------------------------------- forward
 
 def forward(ledger: list[dict], failed: list[dict], register: bool = True) -> dict:
-    """The forward books' numbers from the paper ledger and failed buys (P1's tainted rows skipped): per (rule, pair)
-    the stats, at the book's own stake, and the days they cover."""
+    """The forward books' numbers from the paper ledger and failed buys (P1's tainted rows and the pool state fix's
+    stale ones skipped, `stale` their count): per (rule, pair) the stats, at the book's own stake, and the days they
+    cover."""
     if register:
         metrics.register(trials())
     rows, _ = R.untainted([t for t in ledger if parse(t.get("rule") or "")])
+    n_stale = len(rows)
+    rows = [t for t in rows if not R.stale(t)]
+    n_stale -= len(rows)
     by: dict[tuple, dict] = collections.defaultdict(lambda: {"closed": [], "failed": []})
     for t in rows:
         r, k, _v = parse(t["rule"])
@@ -489,7 +493,7 @@ def forward(ledger: list[dict], failed: list[dict], register: bool = True) -> di
         if ts:
             t0 = min(ts) if t0 is None else min(t0, min(ts))
             t1 = max(ts) if t1 is None else max(t1, max(ts))
-    return {"books": out, "from_ms": t0, "to_ms": t1}
+    return {"books": out, "from_ms": t0, "to_ms": t1, "stale": n_stale}
 
 
 def forward_md(fw: dict | None) -> list[str]:
@@ -505,6 +509,9 @@ def forward_md(fw: dict | None) -> list[str]:
         if s:
             md.append(f"| {k} | {s['signals']} | {s['trades']} | {s['n6040']} | {s['presend']} | {s['other']} | "
                       f"{_pc(s['mean'])} | {s['pnl_sol']:+.4f} |")
+    if fw.get("stale"):
+        md += ["", f"Left out: {fw['stale']} trades of the `@e1_` books filled on a stale pool state before the fix "
+                   f"({R.STALE_NOTE})."]
     return md + [""]
 
 

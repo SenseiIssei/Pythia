@@ -14,6 +14,8 @@ F3's factory books (factory.py, <data>/pumpfun_rt/factory/books.json) run the sa
 file is re-read every RELOAD_S: a new book starts, a retired one goes once it holds nothing.
 E1's bound books (slippage_e1.shadow_books, results/slippage_e1_prereg.md) run the live rules with each bound pair of
 its grid as `<rule>@e1_<pair>`, realistic with the live sizing on their own 0.55 SOL paper wallets.
+Every book fills on the coin's newest pool state by slot, a pool read of a later slot than the last pool trade
+included (sim.Engine(fresh_pool=True), results/pumpfun_pool_state_fix.md); the live service's engine does not.
 
 Nothing here trades: every fill of these books is the engine's curve
 arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The
@@ -210,7 +212,7 @@ class Shadow:
         self.engine = Engine([rule, model_rule(rule)], book=self.book, decisions=False,
                              model=Filter(self.models) if self.models else None, on_close=self._closed,
                              strategies=old, wallets=wallets, cats=cats, models=self.models, kill=kill,
-                             select=True, trend=True, social=True)
+                             select=True, trend=True, social=True, fresh_pool=True)   # G1's fix, paper only
         if realistic:
             R.books(self.engine, strategies, self.real, self.paper_wallets, kill=kill)
             R.small_books(self.engine, self.real, self.paper_wallets, kill=kill, small=small)   # R2
