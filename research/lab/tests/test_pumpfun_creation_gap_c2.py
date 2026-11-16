@@ -175,7 +175,7 @@ def test_coverage_counts_a_creation_on_any_day_and_splits_stream_and_late(tmp_pa
     res["t"] = T0 + 86_400_000                            # written the next day: DAY is a full day
     md = CV.report_md(res)
     assert "| from stream | late |" in md and "25.0%" in md and "failed 1" in md and "none logged 1" in md
-    assert "| PumpSwap | 2 | 2 | 1 |" in md and "—" not in md
+    assert "| PumpSwap | 2 | 2 | 1 |" in md and "\u2014" not in md
     # a day written before C2 (no split) still renders
     old = json.loads(json.dumps(res))
     for k in ("creation_stream_share", "creation_late_share", "missing"):
