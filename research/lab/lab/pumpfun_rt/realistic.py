@@ -10,10 +10,12 @@ prices live never got (live buys land a median 9.8 s after the signal, sales 3.9
 realistic model, the default of every pipeline paper book since R1 (live.Shadow):
 
   latency   the buy (signal to landing), the sale (decision to landing) and the buy's send to landing drawn per trade
-            from the live bot's own fills of the last FIT_DAYS days (<data>/live/pumpfun_rt/measured.jsonl, what
-            execution.json is made of): their empirical quantiles, one uniform per key (strategy, coin, side, leg)
-            as curve.Costs hashes it, so a replay draws the same; a side with fewer than MIN_ORDERS live fills takes
-            the fixed fallback (lognormal around the measured 9.8 s and 3.9 s). Refitted daily by this job.
+            from the live bot's own newest FIT_N fills of any age (<data>/live/pumpfun_rt/measured.jsonl, what
+            execution.json is made of; results/pumpfun_realistic_fit_window.md, a 7-day window left nothing once the
+            live bot was paused): their empirical quantiles, one uniform per key (strategy, coin, side, leg) as
+            curve.Costs hashes it, so a replay draws the same; a field with fewer than FIT_N live orders takes the
+            fixed fallback (lognormal around the measured 9.8 s and 3.9 s). Each field says its source, count and
+            newest order. Refitted daily by this job.
   fills     at the pool or curve state of the first recorded trade at or after the landing (that trade included:
             we are not first in our slot), else FILL_WAIT_MS later on the state as it stands; the stake's own price
             impact on those reserves (curve.py arithmetic and fees); a pool buy accepts down to the quote / 1.60
@@ -50,6 +52,14 @@ The pool state fix (results/pumpfun_pool_state_fix.md): the shadow fills on the 
 (sim.Engine(fresh_pool=True)); the ledger rows of the restated books that filled on a stale one before it (STALE_PATH,
 stale) are skipped and counted by P3's, R2's and E1's tables and the ladder, as P1's tainted rows.
 
+The fit window (results/pumpfun_realistic_fit_window.md): the live bot is idle since its last order on 2026-10-30, so a
+7-day window left every field on the fallback; the fit takes the newest FIT_N live orders per field of any age, and
+realistic.md says per field its source, count and newest order. `window` replays the ladder's window on the fallback
+and on the new fit (P_pool0 and P_pool0_wait, R7's band) and checks that the recorder's receive lag is counted once.
+
+    python -m lab.pumpfun_rt.realistic window --fit fallback|new --json OUT.json        one replay (heavy: flock)
+    python -m lab.pumpfun_rt.realistic window --before A.json --after B.json [--out MD]   the report
+
 The old books run on as `<name>_ideal` twins until IDEAL_UNTIL (two weeks), then go. The calibration line compares
 the live bot with the realistic paper twin P_pool0_wait on the same coins (entry and exit price, P&L in points);
 calibrated when the median P&L difference per matched trade is within CALIB_POINTS over 7 full days. Nothing here
@@ -76,8 +86,8 @@ from . import curve as C
 from . import pipeline as P
 from . import sizing as Z
 
-FIT_DAYS = 7
-MIN_ORDERS = 30
+FIT_N = 50                                # the newest live orders per field the fit takes, of any age
+MIN_ORDERS = 30                           # the live twin's windowed fit: a field with fewer takes the fallback
 DAY_MS = 86_400_000
 LAT_LO_MS, LAT_HI_MS = 0.0, 120_000.0      # a draw's range: a landing at or before the signal is the signal's slot
 FILL_WAIT_MS = 2_000                      # no trade of the coin this long after the landing: the state as it stands
@@ -227,43 +237,56 @@ class Fit:
                    {**FAIL_FEE, **{k: int(v) for k, v in (d.get("fail_fee") or {}).items()}}, d.get("live") or {})
 
 
-def fit(rows: list[dict], now_ms: int, days: int = FIT_DAYS) -> Fit:
-    """The model from the live executor's measured.jsonl rows of the last `days` days (test or full mode): each side's
-    landing latencies (a side under MIN_ORDERS fills: the fallback), the buy's send to landing, the median fee per
-    transaction, the buy failures per kind and their fees."""
-    lo = now_ms - days * DAY_MS
-    rows = [r for r in rows if lo <= int(r.get("t") or 0) <= now_ms and r.get("mode") in ("test", "full")]
+def fit(rows: list[dict], now_ms: int, days: int | None = None, n: int | None = FIT_N) -> Fit:
+    """The model from the live executor's measured.jsonl rows (test or full mode) at or before now_ms: per field the
+    newest `n` live orders of any age (results/pumpfun_realistic_fit_window_prereg.md), a field with fewer takes the
+    fallback; each side's landing latencies, the buy's send to landing, the median fee per transaction, the buy
+    failures per kind over the buy orders and their fees. With `days` (the live twin's leave-one-day-out) all orders
+    of the last `days` days, a field under MIN_ORDERS the fallback, as before. live["fields"]: per field its source,
+    count and newest order's time."""
+    lo = now_ms - days * DAY_MS if days else None
+    rows = sorted((r for r in rows if (lo is None or lo <= int(r.get("t") or 0)) and int(r.get("t") or 0) <= now_ms
+                   and r.get("mode") in ("test", "full")), key=lambda r: int(r.get("t") or 0))
+    k = None if days else n
+    need = k or MIN_ORDERS
+
+    def last(xs):
+        return xs[-k:] if k else xs
     fills = [r for r in rows if r.get("what") == "fill" and r.get("lat_ms") is not None]
-    buys = [float(r["lat_ms"]) for r in fills if r.get("side") == "buy"]
-    sells = [float(r["lat_ms"]) for r in fills if r.get("side") == "sell"]
-    send = [max(0.0, float(r["send_to_land_ms"])) for r in fills
-            if r.get("side") == "buy" and r.get("send_to_land_ms") is not None]
-    fees = [int(r["fee_l"]) for r in rows if r.get("what") == "fee" and r.get("fee_l")]
-    failed = [(fail_kind(r.get("why")), int(r.get("fee_l") or 0)) for r in rows
-              if r.get("what") == "failed" and r.get("side") == "buy"]
-    failed = [(k, f) for k, f in failed if k is not None]
-    orders = len(buys) + len(failed)
+    buys = last([r for r in fills if r.get("side") == "buy"])
+    sells = last([r for r in fills if r.get("side") == "sell"])
+    send = last([r for r in fills if r.get("side") == "buy" and r.get("send_to_land_ms") is not None])
+    fees = last([r for r in rows if r.get("what") == "fee" and r.get("fee_l")])
+    orders = last([r for r in rows if r.get("side") == "buy" and (
+        (r.get("what") == "fill" and r.get("lat_ms") is not None)
+        or (r.get("what") == "failed" and fail_kind(r.get("why")) is not None))])
+    failed = [(fail_kind(r.get("why")), int(r.get("fee_l") or 0)) for r in orders if r.get("what") == "failed"]
     f = Fit()
-    src = {}
-    for side, xs in (("buy", buys), ("sell", sells), ("send", send)):
-        ok = len(xs) >= MIN_ORDERS
+    src, fields = {}, {}
+    for side, xs, val in (("buy", buys, lambda r: float(r["lat_ms"])), ("sell", sells, lambda r: float(r["lat_ms"])),
+                          ("send", send, lambda r: max(0.0, float(r["send_to_land_ms"])))):
+        ok = len(xs) >= need
         src[side] = "live" if ok else "fallback"
         if ok:
-            setattr(f, side, Empirical(tuple(sorted(xs))))
-    if len(fees) >= MIN_ORDERS:
-        f.fee_l = int(np.median(fees))
-    kinds = sorted({k for k, _ in failed})
-    if orders >= MIN_ORDERS:
-        f.fail = {k: sum(1 for x, _ in failed if x == k) / orders for k in kinds if k != "6040"}
+            setattr(f, side, Empirical(tuple(sorted(val(r) for r in xs))))
+    if len(fees) >= need:
+        f.fee_l = int(np.median([int(r["fee_l"]) for r in fees]))
+    kinds = sorted({x for x, _ in failed})
+    if len(orders) >= need:
+        f.fail = {x: sum(1 for y, _ in failed if y == x) / len(orders) for x in kinds if x != "6040"}
         src["fail"] = "live"
     else:
         src["fail"] = "fallback"
-    for k in kinds:
-        f.fail_fee[k] = int(np.median([v for x, v in failed if x == k]))
-    f.live = {"from_ms": lo, "to_ms": now_ms, "days": days, "buys": len(buys), "sells": len(sells),
-              "buy_orders": orders, "fees": len(fees), "source": src,
-              "failed": {k: sum(1 for x, _ in failed if x == k) for k in kinds},
-              "rate_6040": (sum(1 for x, _ in failed if x == "6040") / orders) if orders else None}
+    for x in kinds:
+        f.fail_fee[x] = int(np.median([v for y, v in failed if y == x]))
+    src["fee"] = "live" if len(fees) >= need else "fallback"
+    for name, xs in (("buy", buys), ("sell", sells), ("send", send), ("fee", fees), ("fail", orders)):
+        fields[name] = {"source": src[name], "n": len(xs), "newest_ms": int(xs[-1]["t"]) if xs else None}
+    f.live = {"from_ms": lo if lo is not None else (int(orders[0]["t"]) if orders else None), "to_ms": now_ms,
+              "days": days, "n": k, "buys": len(buys), "sells": len(sells), "buy_orders": len(orders),
+              "fees": len(fees), "source": src, "fields": fields,
+              "failed": {x: sum(1 for y, _ in failed if y == x) for x in kinds},
+              "rate_6040": (sum(1 for x, _ in failed if x == "6040") / len(orders)) if orders else None}
     return f
 
 
@@ -1111,7 +1134,7 @@ def calib_line(cal: dict, word: str, days_covered: float) -> str:
 
 
 def daily(now_ms: int | None = None, write: bool = True) -> dict:
-    """The daily job: the fit from the last FIT_DAYS days of live orders, the live settings, the calibration line of
+    """The daily job: the fit from the newest FIT_N live orders per field, the live settings, the calibration line of
     the last CALIB_DAYS days (realistic paper only: since state.json's realistic_since), into realistic.json/md and
     one row a day in realistic_calib.csv."""
     from . import measure
@@ -1178,9 +1201,17 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
     return out
 
 
+def field_stamp(x: dict | None, now_ms: int, source: str | None = None) -> tuple[str, str, str]:
+    """A fit field's source, its count of live orders and its newest order's time and age (fit's live["fields"])."""
+    x = x or {}
+    t = x.get("newest_ms")
+    age = "none" if t is None else (f"{datetime.fromtimestamp(t / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC, "
+                                    f"{max(0.0, (now_ms - t) / DAY_MS):.1f} days old")
+    return source or x.get("source") or "fallback", str(int(x.get("n") or 0)), age
+
+
 def markdown(d: dict) -> str:
     f = Fit.from_json(d["fit"])
-    src = (f.live or {}).get("source") or {}
 
     def ms(dist):
         x = describe(dist)
@@ -1188,6 +1219,10 @@ def markdown(d: dict) -> str:
     fails = ", ".join(f"{k} {v * 100:.1f} %" for k, v in sorted(f.fail.items())) or "none"
     r6 = (f.live or {}).get("rate_6040")
     cfg = d.get("config") or {}
+    fields = (f.live or {}).get("fields") or {}
+
+    def stamp(name, source=None):
+        return " | ".join(field_stamp(fields.get(name), d["updated_ms"], source))
     return "\n".join([
         "# pump.fun realistic paper", "",
         d["calibration"]["line"], "",
@@ -1198,17 +1233,18 @@ def markdown(d: dict) -> str:
            f"R2 and E1 tables and the ladder skip them ({STALE_NOTE}).", ""] if d.get("stale") else []),
         f"The model every pipeline paper book trades by (lab/pumpfun_rt/realistic.py), fitted "
         f"{datetime.fromtimestamp(d['updated_ms'] / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC from the live bot's "
-        f"orders of the last {FIT_DAYS} days ({(f.live or {}).get('buys', 0)} buys, {(f.live or {}).get('sells', 0)} "
-        f"sales; a side with fewer than {MIN_ORDERS} takes the fixed fallback).", "",
-        "| what | model | source |", "|---|---|---|",
-        f"| buy, signal to landing | {ms(f.buy)} | {src.get('buy', 'fallback')} |",
-        f"| sale, decision to landing | {ms(f.sell)} | {src.get('sell', 'fallback')} |",
-        f"| buy, send to landing (the pre-send check) | {ms(f.send)} | {src.get('send', 'fallback')} |",
+        f"newest {(f.live or {}).get('n') or FIT_N} orders per field, of any age "
+        f"({(f.live or {}).get('buys', 0)} buys, {(f.live or {}).get('sells', 0)} sales; a field with fewer takes the "
+        "fixed fallback; results/pumpfun_realistic_fit_window.md).", "",
+        "| what | model | source | orders | newest order |", "|---|---|---|---|---|",
+        f"| buy, signal to landing | {ms(f.buy)} | {stamp('buy')} |",
+        f"| sale, decision to landing | {ms(f.sell)} | {stamp('sell')} |",
+        f"| buy, send to landing (the pre-send check) | {ms(f.send)} | {stamp('send')} |",
         f"| network fee per transaction | {f.fee_l / C.LAMPORTS:.6f} SOL, Sender tip {f.tip_l / C.LAMPORTS:.6f} SOL "
-        f"| {'live' if (f.live or {}).get('fees', 0) >= MIN_ORDERS else 'fallback'} |",
-        f"| buy failures drawn per buy | {fails} | {src.get('fail', 'fallback')} |",
+        f"| {stamp('fee')} |",
+        f"| buy failures drawn per buy | {fails} | {stamp('fail')} |",
         f"| live 6040 rate per buy (modelled by the 60 % bound, not drawn) | "
-        f"{'n/a' if r6 is None else f'{r6 * 100:.1f} %'} | live |", "",
+        f"{'n/a' if r6 is None else f'{r6 * 100:.1f} %'} | {stamp('fail', 'live')} |", "",
         f"Paper wallet {START_SOL} SOL per book; sizing as live: limits {'wallet' if cfg.get('wallet') else 'fixed'}, "
         f"share {cfg.get('share', Z.SHARE) * 100:g} %, brake {'on' if cfg.get('brake', True) else 'off'}, floor "
         f"{cfg.get('floor_sol') if cfg.get('floor_sol') is not None else Z.PAUSE_BELOW_SOL} SOL, at most "
@@ -1249,7 +1285,8 @@ def run_r1(root=None, until_ms: int | None = None, log=print, model: Model | Non
     calibration books (P_pool0_wait realistic and ideal at 0.1 SOL without a slot, exposure or loss limit: every coin
     the strategy signals, so each of the live bot's coins has its paper trade). The Y9 filters on Y9's walk-forward
     models (select9: trained at the end of each day for the next), so they trade from the second recorded day; every
-    book draws its latency with its strategy's own key. The fit: the live orders of the FIT_DAYS days to the cutoff."""
+    book draws its latency with its strategy's own key. The fit: the newest FIT_N live orders per field up to the
+    cutoff."""
     from . import early as EA
     from . import select9 as S9
     from . import selfeat as SF
@@ -1382,15 +1419,154 @@ def r1_markdown(res: dict, cal: dict, cal_i: dict) -> str:
           f"{pc(c['paper_mean'])} |" for lab, c in (("realistic", cal), ("ideal (old)", cal_i))], ""])
 
 
+# ---------------------------------------------------------------- the fit window
+
+WINDOW_PREREG = "results/pumpfun_realistic_fit_window_prereg.md"
+WINDOW_OUT = Path(__file__).resolve().parents[2] / "results" / "pumpfun_realistic_fit_window.md"
+WINDOW_BOOKS = ("P_pool0", "P_pool0_wait")
+
+
+def window_trials() -> list[dict]:
+    return [{"id": f"pumpfun:fit_window:{b}", "family": "pumpfun", "n": 2, "sharpe": None, "source": WINDOW_PREREG}
+            for b in WINDOW_BOOKS] + [{"id": "pumpfun:fit_window:recv_lag", "family": "pumpfun", "n": 1,
+                                       "sharpe": None, "source": WINDOW_PREREG}]
+
+
+def window_replay(new: bool, root=None, log=print, now_ms: int | None = None) -> dict:
+    """One pool_fix replay of the ladder's window (fresh_pool on, as the shadow runs) on the fallback (new False) or
+    on the fit of the newest FIT_N live orders at now_ms; the live sizing settings of the day; WINDOW_BOOKS kept."""
+    from . import pool_fix as PF
+    now_ms = now_ms or int(time.time() * 1000)
+    model = Model(fit(_measured(), now_ms) if new else Fit(), LiveConfig.load())
+    res = PF.replay(True, root, log, model)
+    res["books"] = {b: res["books"].get(b) or [] for b in WINDOW_BOOKS}
+    res["new"], res["fit_ms"] = new, now_ms
+    return res
+
+
+def window_compare(before: dict, after: dict) -> dict:
+    """Per book: entries, mean and R7's band (pool_fix.stats of ladder.pf_entries' rule) under the fallback and the
+    new fit, and the change in points (new less fallback)."""
+    from . import pool_fix as PF
+    out = {}
+    for b in WINDOW_BOOKS:
+        sa, sb = (PF.stats(PF.per_entry(r["books"].get(b) or [])) for r in (before, after))
+        out[b] = {"fallback": sa, "new": sb, "pts": (sb["mean"] - sa["mean"]) * 100
+                  if sa["mean"] is not None and sb["mean"] is not None else None}
+    return out
+
+
+def recv_lag(ledger: list[dict], measured: list[dict], since_ms: int) -> dict:
+    """Is the recorder's receive lag in paper's signal to landing once or twice? Paper: the WINDOW_BOOKS rows from
+    since_ms with their drawn latency (P1's tainted rows and restarts out): land less signal less the draw, which is
+    only the wait for the next recorded trade (0 to FILL_WAIT_MS) when nothing more is added. Live: what lat_ms spans
+    (recv_ms less signal_ms, the bot's own receive after its slot clock, where recorded)."""
+    xs = []
+    for r in ledger:
+        s, ld, lat = _f(r.get("signal_ms")), _f(r.get("land_ms")), _f(r.get("lat_buy_ms"))
+        if (r.get("rule") in WINDOW_BOOKS and s is not None and s >= since_ms and ld is not None and lat is not None
+                and r.get("exit_why") != "restart" and not tainted(r)):
+            xs.append(ld - s - lat)
+    live = [(float(r["recv_ms"]) - float(r["signal_ms"]), float(r["lat_ms"])) for r in measured
+            if r.get("what") == "fill" and r.get("side") == "buy" and r.get("recv_ms") is not None
+            and r.get("signal_ms") is not None and r.get("lat_ms") is not None]
+    inside = sum(1 for x in xs if -1 <= x <= FILL_WAIT_MS + 1)
+
+    def qs(v):
+        return {k: _q(v, q) for k, q in (("p10", 0.1), ("median", 0.5), ("p90", 0.9))} | {
+            "max": max(v) if v else None}
+    return {"paper": len(xs), "extra": qs(xs), "inside": inside, "share": inside / len(xs) if xs else None,
+            "live": len(live), "recv": qs([a for a, _ in live]), "lat": qs([b for _, b in live]),
+            "verdict": "once" if xs and inside == len(xs) else "check"}
+
+
+def window_markdown(res: dict) -> str:
+    def pc(x):
+        return "n/a" if x is None else f"{x * 100:+.1f} %"
+
+    def band(s):
+        return "n/a" if s.get("lo") is None or s["n"] < 2 else f"{pc(s['lo'])} to {pc(s['hi'])}"
+
+    def sec(x):
+        return "n/a" if x is None else f"{x / 1000:.1f} s"
+    f, cmp_, lag, b = Fit.from_json(res["after"]["fit"]), res["books"], res["lag"], res["before"]
+    fields = (f.live or {}).get("fields") or {}
+    md = ["# pump.fun realistic model: the fit on the last live orders of any age", "",
+          f"Pre-registration `{WINDOW_PREREG}`. Replay of the record's days {b['days'][0]} to {b['days'][-1]} "
+          f"(`pool_fix.replay`, the engine as the shadow builds it, `fresh_pool` on as the shadow runs since the pool "
+          f"state fix, the realistic executor, the live sizing settings of the run's day), signals from 2026-10-24 "
+          f"01:43 UTC (the ladder's window) to {b['days'][-1]} 24:00 UTC, entries until 15 minutes before the end; "
+          f"once on the fixed fallback, once on the new fit. The replay runs today's engine, so P1's late-row bug does "
+          f"not arise in it. Entries: closed trades and failed buys (a failed buy its fee over the book's median "
+          f"stake). Band: R7's 95 % band clustered by UTC day. Points: new less fallback. Three trials in R5's "
+          f"registry, family pumpfun, counted only (`pumpfun:fit_window:*`); no Sharpe, no DSR.", "",
+          "## The new fit", "",
+          f"The newest {(f.live or {}).get('n') or FIT_N} live orders per field, of any age, at "
+          f"{datetime.fromtimestamp(res['after']['fit_ms'] / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC:", "",
+          "| what | model | source | orders | newest order |", "|---|---|---|---|---|"]
+    for name, what, dist in (("buy", "buy, signal to landing", f.buy), ("sell", "sale, decision to landing", f.sell),
+                             ("send", "buy, send to landing", f.send)):
+        x = describe(dist)
+        md.append(f"| {what} | {sec(x['median'])} (10 to 90 %: {sec(x['p10'])} to {sec(x['p90'])}) | "
+                  f"{' | '.join(field_stamp(fields.get(name), res['after']['fit_ms']))} |")
+    fails = ", ".join(f"{k} {v * 100:.1f} %" for k, v in sorted(f.fail.items())) or "none"
+    md += [f"| network fee per transaction | {f.fee_l / C.LAMPORTS:.6f} SOL | "
+           f"{' | '.join(field_stamp(fields.get('fee'), res['after']['fit_ms']))} |",
+           f"| buy failures drawn per buy | {fails} | "
+           f"{' | '.join(field_stamp(fields.get('fail'), res['after']['fit_ms']))} |", "",
+           "The fallback: buy 9.8 s, sale 3.9 s, send 0.5 s median (lognormal), fee 0.000215 SOL, not landed "
+           "3.0 %.", "",
+           "## Sensitivity", "",
+           "| book | entries, fallback | mean, fallback | band, fallback | entries, new fit | mean, new fit | "
+           "band, new fit | points |", "|---|---|---|---|---|---|---|---|"]
+    for name, x in cmp_.items():
+        s0, s1 = x["fallback"], x["new"]
+        md.append(f"| {name} | {s0['n']} | {pc(s0['mean'])} | {band(s0)} | {s1['n']} | {pc(s1['mean'])} | "
+                  f"{band(s1)} | {'n/a' if x['pts'] is None else format(x['pts'], '+.1f')} |")
+    e, r, lt = lag["extra"], lag["recv"], lag["lat"]
+    md += ["", "## The receive lag: once or twice", "",
+           f"Paper ledger, {', '.join(WINDOW_BOOKS)} from the ladder's window (P1's tainted rows and restarts out), "
+           f"{lag['paper']} rows: land less signal less the drawn latency p10 {sec(e['p10'])}, median "
+           f"{sec(e['median'])}, p90 {sec(e['p90'])}, max {sec(e['max'])}; {lag['inside']} of {lag['paper']} within "
+           f"0 to {FILL_WAIT_MS / 1000:.0f} s (the wait for the next recorded trade). Live buys with a receive time "
+           f"({lag['live']}): received a median {sec(r['median'])} after their signal time (p90 {sec(r['p90'])}), "
+           f"signal to landing median {sec(lt['median'])}.", ""]
+    md += res.get("lag_text") or []
+    return "\n".join(md) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="lab.pumpfun_rt.realistic")
-    ap.add_argument("cmd", nargs="?", default="daily", choices=("daily", "run"))
+    ap.add_argument("cmd", nargs="?", default="daily", choices=("daily", "run", "window"))
     ap.add_argument("--out", default=None)
     ap.add_argument("--until", default=None, help="run: replay up to this UTC time (YYYY-MM-DDTHH:MM)")
+    ap.add_argument("--fit", choices=("fallback", "new"), default=None, help="window: one replay on this fit")
+    ap.add_argument("--json", default=None, help="window: the replay's output, or with --before the report's")
+    ap.add_argument("--before", default=None, help="window: the fallback replay's JSON (report)")
+    ap.add_argument("--after", default=None, help="window: the new fit's replay JSON (report)")
     a = ap.parse_args(sys.argv[1:] if argv is None else argv)
     if a.cmd == "daily":
         d = daily()
         print(markdown(d))
+        return 0
+    if a.cmd == "window":
+        from .. import metrics
+        metrics.register(window_trials())                    # before any number of this study exists
+        if a.fit:
+            res = window_replay(a.fit == "new")
+            Path(a.json).write_text(json.dumps(res, default=float), encoding="utf-8")
+            return 0
+        from .live import paper_dir
+        from .pool_fix import WINDOW_FROM_MS
+        before, after = (json.loads(Path(p).read_text(encoding="utf-8")) for p in (a.before, a.after))
+        res = {"before": before, "after": after, "books": window_compare(before, after),
+               "lag": recv_lag(read_csv(paper_dir() / "ledger.csv"), _measured(), WINDOW_FROM_MS)}
+        if a.json:
+            Path(a.json).write_text(json.dumps({k: v for k, v in res.items() if k in ("books", "lag")},
+                                               default=float), encoding="utf-8")
+        out = Path(a.out) if a.out else WINDOW_OUT
+        out.write_text(window_markdown(res), encoding="utf-8")
+        print(f"window: report -> {out}")
         return 0
     until = int(datetime.strptime(a.until, "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc).timestamp() * 1000) \
         if a.until else None

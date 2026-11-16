@@ -1,8 +1,10 @@
-"""R1, realistic paper for pump.fun: the fit from the live orders (and its fallback under 30), the seeded draws, the
-fill at the first recorded trade after the landing (a spike gone by then is not captured), the pre-send skip and the
-6040 on landing of a pool buy, the drawn failures, the fees with and without the tip, the live sizing on the paper
-wallet, the owner's settings, the calibration line and the daily job's files, the paper books' realistic default with
-their _ideal twins until 2026-11-06, and the ledger's new column. No network, no wallet.
+"""R1, realistic paper for pump.fun: the fit from the newest 50 live orders per field of any age (its fallback under
+50, its source, count and age per field, the live twin's window unchanged), the seeded draws, the fill at the first
+recorded trade after the landing (a spike gone by then is not captured), the pre-send skip and the 6040 on landing
+of a pool buy, the drawn failures, the fees with and without the tip, the live sizing on the paper wallet, the
+owner's settings, the calibration line and the daily job's files, the paper books' realistic default with their
+_ideal twins until 2026-11-06, the ledger's new column, and the fit window study's comparison, receive lag check and
+report. No network, no wallet.
 
 Run from research/lab:  python -m pytest tests/test_pumpfun_realistic.py
 """
@@ -58,55 +60,101 @@ def test_the_live_executors_numbers_are_the_models():
     assert R.POOL_BUY_TOL == LX.LIVE_POOL_BUY_TOL and R.RESERVE_SOL == LX.RESERVE_SOL
     assert R.TIP_L == LX.sender_tip_lamports({}) and R.RAN_AWAY == LX.RAN_AWAY
     assert R.RAN_AWAY_LANDING == LX.RAN_AWAY_LANDING
-    assert R.START_SOL == 0.55 and R.MIN_ORDERS == 30 and R.FIT_DAYS == 7
+    assert R.START_SOL == 0.55 and R.MIN_ORDERS == 30 and R.FIT_N == 50
 
 
 # ---------------------------------------------------------------- the fit
 
-def measured(now, n_buy=40, n_sell=35, old=True):
+def measured(now, n_buy=40, n_sell=35, old=True, n_fee=51):
     rows = []
     for i in range(n_buy):
         rows.append({"t": now - 1000 * i, "what": "fill", "mode": "test", "side": "buy", "lat_ms": 1000.0 * (i + 1),
                      "send_to_land_ms": -100 if i == 0 else 500.0})
     for i in range(n_sell):
         rows.append({"t": now - 1000 * i, "what": "fill", "mode": "test", "side": "sell", "lat_ms": 200.0 * (i + 1)})
-    rows += [{"t": now - 5, "what": "fee", "mode": "test", "fee_l": 300_000} for _ in range(31)]
+    rows += [{"t": now - 5, "what": "fee", "mode": "test", "fee_l": 300_000} for _ in range(n_fee)]
     rows += [{"t": now - 5, "what": "failed", "mode": "test", "side": "buy", "why": "not landed", "fee_l": 0}] * 3
     rows += [{"t": now - 5, "what": "failed", "mode": "test", "side": "buy", "fee_l": 1_005_000,
               "why": "failed on chain: {'InstructionError': [6, {'Custom': 6040}]}"}] * 2
     rows += [{"t": now - 5, "what": "failed", "mode": "test", "side": "buy", "fee_l": 0,
               "why": "RuntimeError: Transaction simulation failed"}]
     rows += [{"t": now - 5, "what": "failed", "mode": "test", "side": "sell", "why": "not landed", "fee_l": 0}] * 50
-    if old:                                                   # older than 7 days, or not a live mode: not counted
-        rows += [{"t": now - 8 * DAY, "what": "fill", "mode": "test", "side": "buy", "lat_ms": 1e6}] * 50
+    if old:                                                   # after the fit's time, or not a live mode: not counted
+        rows += [{"t": now + DAY, "what": "fill", "mode": "test", "side": "buy", "lat_ms": 1e6}] * 50
         rows += [{"t": now - 5, "what": "fill", "mode": "paper", "side": "buy", "lat_ms": 1e6}] * 50
     return rows
 
 
-def test_the_fit_takes_the_last_seven_days_of_live_orders():
+def test_the_fit_takes_the_newest_fifty_live_orders_per_field_of_any_age():
     now = T0
-    f = R.fit(measured(now), now)
-    assert isinstance(f.buy, R.Empirical) and len(f.buy.ms) == 40 and max(f.buy.ms) == 40_000
-    assert isinstance(f.sell, R.Empirical) and len(f.sell.ms) == 35
+    f = R.fit(measured(now, n_buy=60, n_sell=55), now)
+    assert isinstance(f.buy, R.Empirical) and len(f.buy.ms) == 50 and max(f.buy.ms) == 50_000   # the newest 50
+    assert isinstance(f.sell, R.Empirical) and len(f.sell.ms) == 50
     assert min(f.send.ms) == 0.0                              # a landing reported before the send is the send's
-    assert f.fee_l == 300_000 and f.tip_l == R.TIP_L
-    # failures per buy order (40 fills + 6 failures); 6040 is not drawn (the bound makes it), its live rate reported
-    assert f.fail == pytest.approx({"not landed": 3 / 46, "simulation failed": 1 / 46})
-    assert f.live["rate_6040"] == pytest.approx(2 / 46) and f.fail_fee["6040"] == 1_005_000
-    assert f.live["source"] == {"buy": "live", "sell": "live", "send": "live", "fail": "live"}
-    assert 19_000 < R.describe(f.buy)["median"] < 22_000
+    assert f.tip_l == R.TIP_L
+    # failures over the newest 50 buy orders (the 6 failures and the 44 newest fills); 6040 is not drawn
+    assert f.fail == pytest.approx({"not landed": 3 / 50, "simulation failed": 1 / 50})
+    assert f.live["rate_6040"] == pytest.approx(2 / 50) and f.fail_fee["6040"] == 1_005_000
+    assert f.live["source"] == {"buy": "live", "sell": "live", "send": "live", "fail": "live", "fee": "live"}
+    assert f.fee_l == 300_000
     assert f.tx_l() == 305_000 and f.failed_l() == 300_000 and f.failed_l("not landed") == 0
 
 
-def test_under_thirty_live_orders_a_side_takes_the_fixed_fallback():
-    f = R.fit(measured(T0, n_buy=10, n_sell=40, old=False), T0)
+def test_old_live_orders_count_when_no_newer_ones_exist_and_the_newest_win():
+    now = T0 + 30 * DAY
+    old = measured(T0, n_buy=50, n_sell=50, old=False)        # 30 days before the fit: a 7-day window held none
+    f = R.fit(old, now)
+    assert f.live["fields"]["buy"] == {"source": "live", "n": 50, "newest_ms": T0}
+    assert isinstance(f.buy, R.Empirical) and R.describe(f.buy)["median"] == pytest.approx(25_500.0)
+    newer = [{"t": now - 1000 * i, "what": "fill", "mode": "full", "side": "buy", "lat_ms": 1500.0}
+             for i in range(50)]
+    g = R.fit(old + newer, now)
+    assert g.buy.ms == (1500.0,) * 50 and g.live["fields"]["buy"]["newest_ms"] == now
+    assert len(g.sell.ms) == 50                               # each field counts its own orders
+
+
+def test_the_age_stamp_of_each_field_is_in_the_report():
+    now = T0 + 30 * DAY
+    f = R.fit(measured(T0, n_buy=50, n_sell=10, old=False), now)
+    assert R.field_stamp(f.live["fields"]["buy"], now) == ("live", "50", f"{_utc(T0)} UTC, 30.0 days old")
+    assert R.field_stamp(f.live["fields"]["sell"], now)[:2] == ("fallback", "10")
+    assert R.field_stamp(None, now) == ("fallback", "0", "none")
+    d = {"updated_ms": now, "fit": f.to_json(), "calibration": {"line": "x"}, "config": {}}
+    md = R.markdown(d)
+    assert "newest 50 orders per field, of any age" in md
+    assert f"| buy, signal to landing | 25.5 s" in md and f"| live | 50 | {_utc(T0)} UTC, 30.0 days old |" in md
+    assert "| sale, decision to landing | 3.9 s" in md and "| fallback | 10 |" in md
+    assert "\u2014" not in md
+
+
+def test_under_fifty_live_orders_a_field_takes_the_fixed_fallback():
+    f = R.fit(measured(T0, n_buy=10, n_sell=55, old=False, n_fee=31), T0)
     assert isinstance(f.buy, R.Lognormal) and f.buy.median_ms == 9_800.0
     assert isinstance(f.sell, R.Empirical) and isinstance(f.send, R.Lognormal)
-    assert f.fail == R.FALLBACK_FAIL and f.live["source"]["fail"] == "fallback"
+    assert f.fail == R.FALLBACK_FAIL and f.live["source"]["fail"] == "fallback"   # 10 fills and 6 failures
+    assert f.fee_l == R.FALLBACK_FEE_L and f.live["fields"]["fee"] == {"source": "fallback", "n": 31,
+                                                                         "newest_ms": T0 - 5}
+    f = R.fit(measured(T0, n_buy=49, n_sell=49, old=False), T0)
+    assert isinstance(f.buy, R.Lognormal) and isinstance(f.sell, R.Lognormal)
     empty = R.fit([], T0)
     assert R.describe(empty.buy)["median"] == pytest.approx(9_800.0)
     assert R.describe(empty.sell)["median"] == pytest.approx(3_900.0)
     assert empty.fee_l == R.FALLBACK_FEE_L
+    assert empty.live["fields"]["buy"] == {"source": "fallback", "n": 0, "newest_ms": None}
+
+
+def test_the_live_twins_window_fit_is_unchanged():
+    now = T0
+    f = R.fit(measured(now), now, days=7)                     # all orders of the 7 days, at least 30 a side
+    assert isinstance(f.buy, R.Empirical) and len(f.buy.ms) == 40 and max(f.buy.ms) == 40_000
+    assert isinstance(f.sell, R.Empirical) and len(f.sell.ms) == 35
+    assert f.fail == pytest.approx({"not landed": 3 / 46, "simulation failed": 1 / 46})
+    assert R.fit(measured(now, n_buy=29, old=False), now, days=7).live["source"]["buy"] == "fallback"
+
+
+def _utc(ms) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
 def test_the_fit_goes_through_its_file_and_the_fallback_before_the_first(tmp_path):
@@ -120,7 +168,7 @@ def test_the_fit_goes_through_its_file_and_the_fallback_before_the_first(tmp_pat
 
 
 def test_a_draw_is_seeded_by_its_key():
-    f = R.fit(measured(T0), T0)
+    f = R.fit(measured(T0, n_buy=50, n_sell=50), T0)
     c = R.RealCosts(model=R.Model(f, R.LiveConfig()))
     a = c.latency("P_pool0", MINT, "buy")
     assert a == c.latency("P_pool0", MINT, "buy") and a != c.latency("P_pool0", key(9), "buy")
@@ -445,3 +493,55 @@ def test_an_old_ledger_gets_the_stake_column_once(tmp_path):
     assert len(rows) == 2 and rows[0]["stake_sol"] == "" and rows[1]["stake_sol"] == "0.05"
     live.append_csv(p, live.LEDGER_COLS, [{"rule": "P_pool0", "stake_sol": 0.07}])
     assert list(csv.DictReader(p.open()))[2]["stake_sol"] == "0.07"
+
+
+# ---------------------------------------------------------------- the fit window study
+
+def window_run(rets, failed=0, fit_=None):
+    t0 = 1_793_000_000_000                                    # inside the ladder's window
+    es = [{"mint": key(i), "signal_ms": t0 + i * DAY // 4, "ret": r, "stake_sol": 0.1, "pnl_sol": r * 0.1,
+           "entry_price": 1.0, "exit_why": "tp", "failed": False} for i, r in enumerate(rets)]
+    es += [{"mint": key(100 + i), "signal_ms": t0 + i * 1000, "pnl_sol": -0.0002, "failed": True}
+           for i in range(failed)]
+    return {"days": ["2026-10-24", "2026-11-15"], "books": {b: es for b in R.WINDOW_BOOKS},
+            "fit": (fit_ or R.Fit()).to_json(), "fit_ms": t0 + 20 * DAY}
+
+
+def test_the_window_study_compares_the_two_fits_per_book_in_points():
+    assert [t["id"] for t in R.window_trials()] == ["pumpfun:fit_window:P_pool0", "pumpfun:fit_window:P_pool0_wait",
+                                                     "pumpfun:fit_window:recv_lag"]
+    assert all(t["family"] == "pumpfun" and t["sharpe"] is None for t in R.window_trials())
+    before, after = window_run([0.1, -0.1, 0.0, 0.2]), window_run([0.0, -0.1, 0.0, 0.1], failed=1)
+    c = R.window_compare(before, after)
+    assert c["P_pool0"]["fallback"]["n"] == 4 and c["P_pool0"]["new"]["n"] == 5     # a failed buy is an entry
+    assert c["P_pool0"]["fallback"]["mean"] == pytest.approx(0.05)
+    assert c["P_pool0"]["new"]["mean"] == pytest.approx((0.0 - 0.1 + 0.0 + 0.1 - 0.002) / 5)
+    assert c["P_pool0"]["pts"] == pytest.approx(((0.0 - 0.1 + 0.0 + 0.1 - 0.002) / 5 - 0.05) * 100)
+    assert c["P_pool0"]["new"]["lo"] is not None
+
+
+def test_the_receive_lag_check_reads_the_ledgers_extra_time_over_the_draw():
+    since = 1_793_000_000_000
+    rows = [{"rule": "P_pool0", "signal_ms": since + i, "land_ms": since + i + 1500 + 300, "lat_buy_ms": 1500,
+             "exit_why": "tp"} for i in range(10)]
+    rows += [{"rule": "P_pool0", "signal_ms": since - DAY, "land_ms": since, "lat_buy_ms": 0},     # before the window
+             {"rule": "P_cmig_model", "signal_ms": since, "land_ms": since + 99_000, "lat_buy_ms": 0}]
+    live = [{"what": "fill", "side": "buy", "signal_ms": 1000, "recv_ms": 3200, "lat_ms": 2500},
+            {"what": "fill", "side": "sell", "signal_ms": 1000, "recv_ms": 9000, "lat_ms": 500}]
+    g = R.recv_lag(rows, live, since)
+    assert g["paper"] == 10 and g["inside"] == 10 and g["verdict"] == "once"
+    assert g["extra"]["median"] == pytest.approx(300) and g["live"] == 1 and g["recv"]["median"] == 2200
+    rows.append({"rule": "P_pool0_wait", "signal_ms": since, "land_ms": since + 15_000 + 1500, "lat_buy_ms": 1500})
+    assert R.recv_lag(rows, live, since)["verdict"] == "check"   # 15 s more than the draw: the lag added again
+
+
+def test_the_window_report_shows_both_columns_the_new_fits_stamps_and_the_lag():
+    new = R.fit(measured(T0, n_buy=50, n_sell=50, old=False), T0)
+    before, after = window_run([0.1, -0.1, 0.0, 0.2]), window_run([0.0, -0.1, 0.0, 0.1], fit_=new)
+    after["fit_ms"] = T0 + 2 * DAY
+    lag = R.recv_lag([], [], 0)
+    md = R.window_markdown({"before": before, "after": after, "books": R.window_compare(before, after), "lag": lag,
+                            "lag_text": ["counted once"]})
+    assert "| P_pool0 | 4 | +5.0 % |" in md and "| P_pool0_wait |" in md and "| -5.0 |" in md
+    assert f"| live | 50 | {_utc(T0)} UTC, 2.0 days old |" in md and "counted once" in md
+    assert "\u2014" not in md
