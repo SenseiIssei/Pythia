@@ -114,12 +114,151 @@ def test_goal_live_paper_and_capital(root):
            "zum Ziel fehlen 218,57 €" in t
     # paper: 41 against 40 EUR = +1 EUR in the week
     assert "Papier: Woche +1,00 € über 1 Bücher in EUR und SOL, auf 30 Tage +4,29 €, zum Ziel fehlen 175,71 €" in t
-    # small40_spy_trend: +2.5 % in 10.75 days (paper_books' start is a date), 6.98 % a month, 180 / 0.0698 = 2,580 EUR
-    line = next(ln for ln in t.splitlines() if ln.startswith("Kapital für 180 EUR im Monat, small40_spy_trend"))
-    assert "2.580,00 €" in line and "(Papier, +7,0 % im Monat, 11 Tage)" in line
-    assert "Kapital: keins bei 1 Kandidaten (Papierrendite nicht über 0): tsmom" in t
-    assert "Kapital: 1 Kandidaten ohne gemessene Rendite" in t
+    # W2: small40_spy_trend made +2.5 % in 11 days, under 30 days no figure; tsmom has 30 days but no dated reports
+    assert "Kapital für" not in t
+    assert "Kapital-Regel: eine Zahl nur ab 30 Tagen Aufzeichnung" in t and "minus P2s Lücke +1,5 Punkte" in t
+    assert "Kapital: 1 Kandidaten unter 30 Tagen Aufzeichnung: small40_spy_trend" in t
+    assert "Kapital: 2 Kandidaten ohne Band" in t
     assert "Platte: 277,9 von 463,9 GB frei" in t and "Register: 2.690 Versuche" in t
+
+
+# ---- W2: the capital line (results/weekly_capital_line_prereg.md)
+
+def forward_book(root: Path, name: str, steps: list[float], costs: dict | None = None) -> None:
+    """A forward book with one dated report a day from 2026-10-01 to 2026-11-01, its return compounding `steps`."""
+    v, eq = 0.0, 1.0
+    days = [datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp() * 1000 + i * DAY for i in range(len(steps) + 1)]
+    for i, t in enumerate(days):
+        if i:
+            eq *= 1 + steps[i - 1]
+        v = (eq - 1) * 100
+        p = root / "reports" / "forward" / f"{weekly.day(int(t))}.json"
+        d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"books": []}
+        d["books"].append({"kind": "book", "name": name, "since": "2026-10-01", "return_pct": v})
+        write(root, p.relative_to(root).as_posix(), d)
+    lat = json.loads((root / "reports/forward/latest.json").read_text(encoding="utf-8"))
+    lat["books"].append({"kind": "book", "name": name, "since": "2026-10-01", "return_pct": v, "days": 31,
+                         "elapsed_days": 31.75} | ({"costs": costs} if costs else {}))
+    write(root, "reports/forward/latest.json", lat)
+
+
+def add_rows(root: Path, *rows: dict) -> None:
+    lad = json.loads((root / "reports/ladder/latest.json").read_text(encoding="utf-8"))
+    lad["rows"] += list(rows)
+    write(root, "reports/ladder/latest.json", lad)
+
+
+def steady(n: int = 31) -> list[float]:
+    return [0.005 + (0.001 if i % 2 else -0.001) for i in range(n)]       # +0.5 % a day, sd 0.1 %
+
+
+def expected_lower(steps: list[float]) -> float:
+    mu = sum(steps) / len(steps)
+    sd = (sum((x - mu) ** 2 for x in steps) / (len(steps) - 1)) ** 0.5
+    return 30 * (mu - 1.96 * sd / len(steps) ** 0.5)
+
+
+def cap_line(t: str, name: str) -> str | None:
+    return next((ln for ln in t.splitlines() if ln.startswith(f"Kapital für 180 EUR im Monat, {name}:")), None)
+
+
+def test_capital_from_the_lower_band(root):
+    forward_book(root, "steady", steady())
+    add_rows(root, ladder_row("steady", 1))
+    m = expected_lower(steady())
+    line = cap_line(page_text(root), "steady")
+    assert line is not None and weekly.eur(180 / m) in line and f"untere Grenze {weekly.pct(m)} im Monat" in line
+    assert "Fill-Lücke" not in line and line.endswith("(`reports/forward/latest.json`)")
+    assert 0 < m < 30 * 0.005                                               # below the point, above 0
+
+
+def test_short_record_no_capital(root):
+    forward_book(root, "steady", steady(12))                                # 12 days of +0.5 % a day
+    lat = json.loads((root / "reports/forward/latest.json").read_text(encoding="utf-8"))
+    for b in lat["books"]:
+        b["since"] = "2026-10-20" if b["name"] == "steady" else b["since"]
+    write(root, "reports/forward/latest.json", lat)
+    add_rows(root, ladder_row("steady", 1))
+    t = page_text(root)
+    assert cap_line(t, "steady") is None
+    assert "Kapital: 2 Kandidaten unter 30 Tagen Aufzeichnung: steady, small40_spy_trend" in t
+
+
+def test_band_below_zero_no_capital(root):
+    noisy = [0.002 + (0.03 if i % 2 else -0.03) for i in range(31)]        # point above 0, lower end below
+    forward_book(root, "noisy", noisy)
+    add_rows(root, ladder_row("noisy", 1))
+    assert expected_lower(noisy) < 0 < sum(noisy)
+    t = page_text(root)
+    assert cap_line(t, "noisy") is None
+    assert "Kapital: keins bei 1 Kandidaten (untere Grenze nach Abzügen nicht über 0): noisy" in t
+
+
+def test_fill_gap_lowers_or_removes(root):
+    m = expected_lower(steady())
+    # modelled costs 0.31 % of capital over 31.75 days, fills 2x: 0.31 / 100 * 30 / 31.75 * 1 a month off
+    forward_book(root, "gap", steady(), {"paper_pct": 0.62, "model_pct": 0.31, "ratio": 2.0, "modelled_only": False})
+    # a fill gap under 1 adds nothing; one 20x the model takes the whole band
+    forward_book(root, "cheap", steady(), {"paper_pct": 0.1, "model_pct": 1.0, "ratio": 0.1, "modelled_only": False})
+    forward_book(root, "dear", steady(), {"paper_pct": 20.0, "model_pct": 1.0, "ratio": 20.0, "modelled_only": False})
+    add_rows(root, ladder_row("gap", 1), ladder_row("cheap", 1), ladder_row("dear", 1))
+    t = page_text(root)
+    g = m - 0.31 / 100 * 30 / 31.75 * 1.0
+    line = cap_line(t, "gap")
+    assert line is not None and weekly.eur(180 / g) in line and "Fill-Lücke 2,0x abgezogen" in line
+    assert "untere Grenze " + weekly.pct(g) in line
+    assert weekly.eur(180 / m) in cap_line(t, "cheap") and "Fill-Lücke" not in cap_line(t, "cheap")
+    assert cap_line(t, "dear") is None and "nicht über 0): dear" in t
+
+
+def pumpfun_rule(name: str, lo: float, entries: int, days: float) -> dict:
+    return {"id": f"pumpfun:{name}", "name": name, "short": name, "kind": "rule", "step": 1, "family": "pumpfun",
+            "pumpfun": {"days_record": days, "entries": entries, "mean": lo + 0.02, "lo": lo, "hi": lo + 0.04}}
+
+
+def test_pumpfun_per_trade_and_stake_cap(root):
+    write(root, "reports/pumpfun_rt/live_status.json", {"pnl_total_sol": -0.4, "trades_total": 149, "ack": {
+        "mode": "test", "strategy": "P_x", "max_trade_sol": 0.05, "stake_share": 0.25}})
+    # lower band +12 % an entry minus P2's 1.5 points = 10.5 %; 3,000 entries in 30 days = 3,000 a month;
+    # the most at 0.05 SOL x 90 EUR: 0.105 x 4.5 x 3,000 = 1,417.50 EUR; 180 EUR take 180 / (0.105 x 3,000) = 0.571 EUR
+    # a trade, at a 25 % stake share a wallet of 2.29 EUR
+    add_rows(root, pumpfun_rule("P_fast", 0.12, 3000, 30.0),
+             pumpfun_rule("P_slow", 0.12, 300, 30.0),             # 141.75 EUR at most: not reachable
+             pumpfun_rule("P_young", 0.12, 3000, 20.0),           # under 30 days
+             pumpfun_rule("P_thin", 0.01, 3000, 30.0))            # +1 % - 1.5 points: none
+    t = page_text(root)
+    line = cap_line(t, "P_fast")
+    assert line is not None and weekly.eur(180 / (0.105 * 3000) / 0.25) in line
+    assert "pump.fun je Trade, untere Grenze nach P2 +10,5 % je Einstieg, 3.000 Trades im Monat" in line
+    assert "`reports/pumpfun_rt/live_status.json`" in line and "`reports/ladder/latest.json`" in line
+    assert ("Kapital: nicht erreichbar bei 1 Kandidaten (beim Live-Einsatz von höchstens 0,05 SOL je Trade bei keinem "
+            "Kapital 180 EUR): P_slow") in t
+    assert "Aufzeichnung: P_young, small40_spy_trend" in t
+    assert "nicht über 0): P_thin" in t
+    assert "Live-Einsatz von höchstens 0,05 SOL), nie aus Wallet-Wachstum" in t
+    # without the live ack's cap no pump.fun figure
+    write(root, "reports/pumpfun_rt/live_status.json", {"pnl_total_sol": -0.4, "trades_total": 149})
+    t = page_text(root)
+    assert cap_line(t, "P_fast") is None and "nicht erreichbar" not in t and "(fehlt)" in t
+
+
+def test_pumpfun_wallet_growth_is_not_capital(root):
+    # a 10 EUR book that grew 0.109 to 5.9 SOL in 31 days, its band per entry +0.7 % to +5 %, P2's gap +8.8 points
+    real = json.loads((root / "reports/pumpfun_rt/realistic.json").read_text(encoding="utf-8"))
+    real["selection"]["pts"] = 8.8
+    real["ten"] = [{"book": "P_grow_10eur", "strategy": "P_grow", "start_sol": 0.109, "sol": 5.9, "trades": 2240,
+                    "mean": 0.028, "band": [0.0074, 0.05], "days": 31.0, "since_ms": NOW - 31 * DAY, "pass": False}]
+    write(root, "reports/pumpfun_rt/realistic.json", real)
+    write(root, "reports/pumpfun_rt/live_status.json", {"pnl_total_sol": -0.4, "ack": {"max_trade_sol": 0.05,
+                                                                                       "stake_share": 0.25}})
+    add_rows(root, ladder_row("P_grow_10eur", 1))
+    t = page_text(root)
+    assert cap_line(t, "P_grow_10eur") is None and "nicht über 0): P_grow_10eur" in t
+    # with P2's gap at 0.4 points: +0.34 % an entry x 2,168 trades a month x 4.5 EUR = 33 EUR, under 180: not reachable
+    real["selection"]["pts"] = 0.4
+    write(root, "reports/pumpfun_rt/realistic.json", real)
+    t = page_text(root)
+    assert cap_line(t, "P_grow_10eur") is None and "Kapital 180 EUR): P_grow_10eur" in t
 
 
 def test_paper_minus_live_lanes(root):

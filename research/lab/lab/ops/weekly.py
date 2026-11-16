@@ -1,7 +1,9 @@
 """W1: one weekly page of what matters (results/weekly_page_w1_prereg.md), Sunday 18:00 UTC.
 
 The owner's goal on top (180 EUR net profit a month): how far the live bot and the paper books are from it this
-week, and per candidate on the ladder the capital it would need at its paper return since start. Then what moved on
+week, and per candidate on the ladder the capital it would need (W2, results/weekly_capital_line_prereg.md: 30 days of
+record, the lower end of the 95 % band, pump.fun per trade less P2's gap at the live stake cap, a fill gap taken
+off). Then what moved on
 the ladder, the books' week, paper minus live, the lanes' results, what is red and since when, disk and data, the
 registry's count and noise bar. German, plain, at most about 40 lines; every line names the file it comes from, a
 missing report is said as missing ("fehlt").
@@ -17,8 +19,7 @@ missing report is said as missing ("fehlt").
   _ops/disk/latest.json                 disk and data growth
 
 No new number: the reports' numbers and the pre-registered arithmetic (a week against the page's own snapshot of
-the week before, reports/weekly/<date>.json; times 30/7 for a month; capital = 180 EUR over the monthly return). No
-trial. Reads only and writes nothing but reports/weekly/; never arms, changes or sends anything but the page.
+the week before, reports/weekly/<date>.json; times 30/7 for a month; W2's capital line). No trial. Reads only and writes nothing but reports/weekly/; never arms, changes or sends anything but the page.
 
   python -m lab.ops.weekly             write the page and post the short version (category "studies")
   python -m lab.ops.weekly --print     print the page, write and post nothing
@@ -38,6 +39,9 @@ WEEK_MS = 7 * DAY_MS
 MONTH_DAYS = 30.0
 MAX_LINES = 40
 CAPITAL_ROWS = 5                # candidates with a capital line, the cheapest first; the rest counted
+MIN_RECORD_DAYS = 30.0          # W2: no capital figure under 30 days of record
+Z95 = 1.96                      # W2: the 95 % band's lower end, normal
+CAPITAL_RULE = "research/lab/results/weekly_capital_line_prereg.md"
 LANE_TITLES = 6                 # titles of the week's lanes on the page, the rest counted
 STATE_DE = {"failed": "fehlgeschlagen", "late": "überfällig", "never": "nie gelaufen"}
 VERDICT_DE = {"not yet": "noch nicht", "calibrated": "kalibriert", "not calibrated": "nicht kalibriert"}
@@ -134,9 +138,111 @@ def book_rows(root: Path, now: int, sol_eur: float | None) -> list[dict]:
     return out
 
 
-def monthly(b: dict) -> float | None:
-    """A book's net return a month: since its start times 30 over its days; none under a day."""
-    return b["r"] * MONTH_DAYS / b["days"] if b.get("r") is not None and (b.get("days") or 0) >= 1 else None
+# ---------------------------------------------------------------- W2: the capital line
+
+def _hist_point(d: dict, name: str) -> tuple[float, float, str] | None:
+    """(value, paid in, start) of a book in one dated report: forward's books list (1 + return since start), the
+    small-account and ETF books (equity_eur; paid_eur or capital_eur), the on-chain book (equity_usdc, start_usdc)."""
+    bs = d.get("books")
+    if isinstance(bs, list):
+        b = next((x for x in bs if isinstance(x, dict) and x.get("name") == name), None)
+        v = _n((b or {}).get("return_pct"))
+        return (1 + v / 100, 0.0, str(b.get("since"))) if v is not None else None
+    b = bs.get(name) if isinstance(bs, dict) else (d if (d.get("book") or "onchain_longterm") == name else None)
+    if not isinstance(b, dict):
+        return None
+    def f(k: str) -> float | None:
+        try:
+            return _n(float(b[k])) if isinstance(b.get(k), str) else _n(b.get(k))
+        except ValueError:
+            return None
+    v = f("equity_eur") if f("equity_eur") is not None else f("equity_usdc")
+    paid = next((x for x in (f("paid_eur"), f("capital_eur"), f("start_usdc")) if x is not None), 0.0)
+    return (v, paid, str(b.get("started") or b.get("since") or "")) if v is not None else None
+
+
+def history(root: Path, report: str, name: str, cache: dict) -> list[tuple[int, float, float]]:
+    """[(day_ms, value, paid)] of a book from the dated reports next to its report (reports/<folder>/<date>.json),
+    only the points since its current start."""
+    folder = (root / "reports" / report).parent
+    if folder not in cache:
+        cache[folder] = [(p.stem, notify.read_json(p)) for p in sorted(folder.glob("????-??-??.json"))] \
+            if folder.is_dir() else []
+    pts = []
+    for stem, d in cache[folder]:
+        pt = _hist_point(d, name) if isinstance(d, dict) else None
+        t = _iso_ms(stem + "T00:00:00+00:00")
+        if pt and t is not None:
+            pts.append((t, *pt))
+    start = pts[-1][3] if pts else None
+    return [(t, v, paid) for t, v, paid, st in pts if st == start]
+
+
+def lower_monthly(pts: list[tuple[int, float, float]]) -> float | None:
+    """The lower end of the 95 % band of the mean daily return times 30; each step net of money paid in, over its
+    days. None under 2 steps."""
+    x = []
+    for (t0, v0, p0), (t1, v1, p1) in zip(pts, pts[1:]):
+        g = (t1 - t0) / DAY_MS
+        if g > 0 and v0:
+            x.append((v1 - v0 - (p1 - p0)) / v0 / g)
+    if len(x) < 2:
+        return None
+    mu = sum(x) / len(x)
+    sd = (sum((a - mu) ** 2 for a in x) / (len(x) - 1)) ** 0.5
+    return MONTH_DAYS * (mu - Z95 * sd / len(x) ** 0.5)
+
+
+def fill_gap(fwd: dict, name: str) -> tuple[float, float] | None:
+    """(ratio, monthly discount) of a forward book with a measured fill gap above 1: its modelled costs a month times
+    (ratio - 1); None without one."""
+    b = next((x for x in fwd.get("books") or [] if isinstance(x, dict) and x.get("name") == name), None)
+    c = (b or {}).get("costs")
+    if not isinstance(c, dict) or c.get("modelled_only"):
+        return None
+    ratio, model, days = _n(c.get("ratio")), _n(c.get("model_pct")), _n(b.get("elapsed_days")) or _n(b.get("days"))
+    if ratio is None or ratio <= 1 or model is None or not days:
+        return None
+    return ratio, model / 100 * MONTH_DAYS / days * (ratio - 1)
+
+
+def capital(r: dict, b: dict | None, pf: dict, fwd: dict, hist) -> dict:
+    """One ladder candidate under W2: {"kind": "unknown" | "short" | "none" | "unreachable" | "cap", ...}."""
+    p3 = (b or {}).get("p3")
+    pr = r.get("pumpfun") if r.get("kind") == "rule" else None
+    if isinstance(p3, dict) or isinstance(pr, dict):                         # pump.fun per trade
+        if isinstance(p3, dict):
+            band = p3.get("band") if isinstance(p3.get("band"), list) and len(p3["band"]) == 2 else [None]
+            lo, n, days = _n(band[0]), _n(p3.get("trades")), _n(p3.get("days"))
+        else:
+            lo, n, days = _n(pr.get("lo")), _n(pr.get("entries")), _n(pr.get("days_record"))
+        if lo is None or not n or not days:
+            return {"kind": "unknown"}
+        if days < MIN_RECORD_DAYS:
+            return {"kind": "short", "days": days}
+        if None in (pf["gap"], pf["cap"], pf["sol_eur"]):
+            return {"kind": "unknown"}
+        edge, tpm = lo - pf["gap"] / 100, n / days * MONTH_DAYS
+        if edge <= 0:
+            return {"kind": "none"}
+        if edge * pf["cap"] * pf["sol_eur"] * tpm < GOAL_EUR:
+            return {"kind": "unreachable", "most": edge * pf["cap"] * pf["sol_eur"] * tpm}
+        stake = GOAL_EUR / (edge * tpm)
+        return {"kind": "cap", "eur": stake / (pf["share"] or 1.0), "pumpfun": True, "edge": edge, "tpm": tpm,
+                "stake_sol": stake / pf["sol_eur"], "days": days}
+    if b is None or b.get("currency") == "SOL":                              # no book, or R2's without a band
+        return {"kind": "unknown"}
+    if (b.get("days") or 0) < MIN_RECORD_DAYS:
+        return {"kind": "short", "days": b.get("days") or 0}
+    m = lower_monthly(hist(b["report"], b["name"]))
+    if m is None:
+        return {"kind": "unknown"}
+    gap = fill_gap(fwd, b["name"])
+    if gap:
+        m -= gap[1]
+    if m <= 0:
+        return {"kind": "none"}
+    return {"kind": "cap", "eur": GOAL_EUR / m, "m": m, "gap": gap[0] if gap else None, "days": b["days"]}
 
 
 # ---------------------------------------------------------------- the page
@@ -214,33 +320,59 @@ def build(root: Path, now: int) -> dict:
                      f"fehlen {eur(max(GOAL_EUR - m, 0))} (keine Vorwoche)" + src(PAPER))
         short.append(f"Papier: Monat seit Start {eur(m, True)}")
 
-    # capital per ladder candidate at its paper return
+    # capital per ladder candidate, W2 (results/weekly_capital_line_prereg.md)
     rows = (lad or {}).get("rows") if isinstance(lad, dict) else None
     if rows is None:
         lines.append(missing("Kapital je Kandidat", LADDER))
     else:
-        by = {b["name"]: b for b in books}
-        need, none, unknown = [], [], 0
+        by, cache = {b["name"]: b for b in books}, {}
+        ack = (live or {}).get("ack") if isinstance(live, dict) else None
+        ack = ack if isinstance(ack, dict) else {}
+        sel = (real or {}).get("selection")
+        pf = {"gap": _n(sel.get("pts")) if isinstance(sel, dict) else None, "cap": _n(ack.get("max_trade_sol")),
+              "share": _n(ack.get("stake_share")), "sol_eur": sol_eur}
+        fwd = read("reports/forward/latest.json")
+        fwd = fwd if isinstance(fwd, dict) else {}
+        got: dict[str, list] = {"cap": [], "none": [], "unreachable": [], "short": [], "unknown": []}
         for r in rows:
-            b = by.get(r.get("name")) if r.get("kind") == "book" else None
-            m = monthly(b) if b else None
-            if m is None:
-                unknown += 1
-            elif m <= 0:
-                none.append(r["name"])
+            b = by.get(r.get("name")) if r.get("kind") in ("book", "rule") else None
+            c = capital(r, b, pf, fwd, lambda rel, name: history(root, rel, name, cache))
+            got[c["kind"]].append((r.get("name"), c, b))
+        cut = lambda xs: ", ".join(str(x[0]) for x in xs[:8]) + (", ..." if len(xs) > 8 else "")  # noqa: E731
+        lines.append(f"Kapital-Regel: eine Zahl nur ab {de(MIN_RECORD_DAYS, 0)} Tagen Aufzeichnung, aus der unteren "
+                     f"Grenze des 95-%-Bands; pump.fun je Trade (untere Grenze je Einstieg minus P2s Lücke "
+                     + (f"{de(pf['gap'], 1, True)} Punkte" if pf["gap"] is not None else "(fehlt)")
+                     + ", mal Trades im Monat beim Live-Einsatz von höchstens "
+                     + (i18n.sol(pf["cap"], 2, "de") if pf["cap"] is not None else "(fehlt)")
+                     + "), nie aus Wallet-Wachstum; eine gemessene Fill-Lücke wird abgezogen"
+                     + src(CAPITAL_RULE))
+        for name, c, b in sorted(got["cap"], key=lambda x: x[1]["eur"])[:CAPITAL_ROWS]:
+            if c.get("pumpfun"):
+                lines.append(f"Kapital für {de(GOAL_EUR, 0)} EUR im Monat, {name}: {eur(c['eur'])} (pump.fun je Trade, "
+                             f"untere Grenze nach P2 {pct(c['edge'])} je Einstieg, {de(c['tpm'], 0)} Trades im Monat, "
+                             f"Einsatz {i18n.sol(c['stake_sol'], 3, 'de')}, {de(c['days'], 0)} Tage)"
+                             + src(REALISTIC, LIVE_STATUS) + ("" if b else src(LADDER)))
             else:
-                need.append((GOAL_EUR / m, r["name"], m, b))
-        for cap, name, m, b in sorted(need)[:CAPITAL_ROWS]:
-            lines.append(f"Kapital für {de(GOAL_EUR, 0)} EUR im Monat, {name}: {eur(cap)} (Papier, {pct(m)} im Monat, "
-                         f"{de(b['days'], 0)} Tage){src('reports/' + b['report'])}")
-        if len(need) > CAPITAL_ROWS:
-            lines.append(f"Kapital: {len(need) - CAPITAL_ROWS} weitere Kandidaten mit Rendite über 0" + src(PAPER))
-        if none:
-            lines.append(f"Kapital: keins bei {len(none)} Kandidaten (Papierrendite nicht über 0): "
-                         + ", ".join(none[:8]) + (", ..." if len(none) > 8 else "") + src(PAPER))
-        if unknown:
-            lines.append(f"Kapital: {unknown} Kandidaten ohne gemessene Rendite (kein Buch oder unter einem Tag)"
-                         + src(LADDER))
+                lines.append(f"Kapital für {de(GOAL_EUR, 0)} EUR im Monat, {name}: {eur(c['eur'])} (Papier, untere "
+                             f"Grenze {pct(c['m'])} im Monat, {de(c['days'], 0)} Tage"
+                             + (f", Fill-Lücke {de(c['gap'], 1)}x abgezogen" if c["gap"] else "") + ")"
+                             + src("reports/" + b["report"], *(["reports/forward/latest.json"] if c["gap"] else [])))
+        if len(got["cap"]) > CAPITAL_ROWS:
+            lines.append(f"Kapital: {len(got['cap']) - CAPITAL_ROWS} weitere Kandidaten mit unterer Grenze über 0"
+                         + src(PAPER))
+        if got["none"]:
+            lines.append(f"Kapital: keins bei {len(got['none'])} Kandidaten (untere Grenze nach Abzügen nicht über 0): "
+                         + cut(got["none"]) + src(PAPER, LADDER))
+        if got["unreachable"]:
+            lines.append(f"Kapital: nicht erreichbar bei {len(got['unreachable'])} Kandidaten (beim Live-Einsatz von "
+                         f"höchstens {i18n.sol(pf['cap'], 2, 'de')} je Trade bei keinem Kapital {de(GOAL_EUR, 0)} EUR): "
+                         + cut(got["unreachable"]) + src(REALISTIC, LIVE_STATUS))
+        if got["short"]:
+            lines.append(f"Kapital: {len(got['short'])} Kandidaten unter {de(MIN_RECORD_DAYS, 0)} Tagen Aufzeichnung: "
+                         + cut(sorted(got["short"], key=lambda x: -x[1]["days"])) + src(PAPER, LADDER))
+        if got["unknown"]:
+            lines.append(f"Kapital: {len(got['unknown'])} Kandidaten ohne Band (kein Buch, kein Tagesverlauf oder kein "
+                         f"Band je Trade)" + src(LADDER))
 
     # ---- the ladder
     lines += ["", "## Leiter"]
