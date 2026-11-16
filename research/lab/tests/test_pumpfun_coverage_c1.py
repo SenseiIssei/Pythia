@@ -154,7 +154,9 @@ def test_the_coverage_report_counts_the_record(tmp_path):
     res = CV.build([DAY], tmp_path, live)
     r = res["days"][DAY]
     assert r["migrated"] == {"coins": 3, "pool_state": 2, "creation": 2, "both": 1, "creation_late": 0,
-                             "pool_state_share": 0.6667, "creation_share": 0.6667, "both_share": 0.3333}
+                             "creation_stream": 2, "pool_state_share": 0.6667, "creation_share": 0.6667,
+                             "both_share": 0.3333, "creation_stream_share": 0.6667, "creation_late_share": 0.0,
+                             "missing": {"n": 1, "by": {"none logged": 1}, "why": {}}}
     assert r["live"] == {"mints": 3, "covered": 1, "no_creation": 1, "no_pool_state": 1, "share": 0.3333,
                          "missing": sorted([B, C])}
     g = r["gaps"]

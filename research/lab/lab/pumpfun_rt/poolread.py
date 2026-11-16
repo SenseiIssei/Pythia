@@ -18,6 +18,11 @@ for the pool's state goes on, nothing fills on it. Recorded, so a replay sees wh
 
   PYTHIA_PF_POOL_READ   "0" switches it off (default on)
   PYTHIA_PF_POOL_RPC    the HTTP RPC to read from (default the public mainnet endpoint; one read per migration)
+
+C2 (2026-11-16, the creation read only): getTransaction asks for transactions up to version 1. With version 0 the
+RPC refused every version 1 transaction (-32015, "Transaction version (1) is not supported"), and 10 of 12 coins
+of 2026-11-14 without a creation row had such a creation transaction (results/pumpfun_creation_gap.md). A curve with
+more signatures than the pages allowed raises TooMany instead of giving None, so the collector can tell the two apart.
 """
 
 from __future__ import annotations
@@ -117,8 +122,13 @@ SIG_PAGE = 1000                        # getSignaturesForAddress's most per call
 SIG_PAGES = 10                         # a curve with more than 10,000 transactions is left without its creation
 
 
-def first_signature(call, address: str, pages: int = SIG_PAGES) -> str | None:
-    """The oldest signature of an address (newest first, paged back with `before`), None past `pages` pages."""
+class TooMany(LookupError):
+    """C2: the address has more signatures than the pages allowed; its oldest transaction was not reached."""
+
+
+def oldest_signature(call, address: str, pages: int = SIG_PAGES) -> str | None:
+    """The oldest signature of an address (newest first, paged back with `before`), None when it has none; TooMany
+    past `pages` pages."""
     before = None
     for _ in range(pages):
         opts = {"limit": SIG_PAGE, "commitment": "confirmed", **({"before": before} if before else {})}
@@ -131,21 +141,30 @@ def first_signature(call, address: str, pages: int = SIG_PAGES) -> str | None:
         before = res[-1].get("signature")
         if len(res) < SIG_PAGE:
             return before
-    return None
+    raise TooMany(f"more than {pages * SIG_PAGE:,} signatures")
 
 
-def creation(mint: str, curve: str, call=None, clock=None) -> dict | None:
+def first_signature(call, address: str, pages: int = SIG_PAGES) -> str | None:
+    """The oldest signature of an address, None past `pages` pages."""
+    try:
+        return oldest_signature(call, address, pages)
+    except TooMany:
+        return None
+
+
+def creation(mint: str, curve: str, call=None, clock=None, pages: int = SIG_PAGES) -> dict | None:
     """C1: the creates_late row of a coin whose creation the stream lost, from the oldest transaction of its bonding
     curve: its CreateEvent as the collector keeps it, t the block time (ms), "late" the time it was read (ms).
-    None when that transaction holds no creation of this mint."""
+    None when that transaction holds no creation of this mint; TooMany when the curve has more than `pages` pages of
+    signatures."""
     from . import events as E
     url = rpc_url()
     call = call or (lambda method, params: post(url, method, params))
-    sig = first_signature(call, curve)
+    sig = oldest_signature(call, curve, pages)
     if not sig:
         return None
     d = call("getTransaction", [sig, {"encoding": "json", "commitment": "confirmed",
-                                      "maxSupportedTransactionVersion": 0}])
+                                      "maxSupportedTransactionVersion": 1}])
     if d.get("error"):
         raise RuntimeError(str(d["error"])[:200])
     tx = d.get("result") or {}

@@ -11,7 +11,7 @@ pump.fun program and, on a second connection, on the PumpSwap program
 touches both programs arrives on both streams) and PumpSwap trades of pools
 it did not see a token migrate into. The endpoint is PYTHIA_SOLANA_WS
 (default: the public mainnet endpoint, which documents 40 connections, 100
-requests per 10 s and 100 MB per 30 s per IP; this uses five connections (six
+requests per 10 s and 100 MB per 30 s per IP; this uses six connections (seven
 with the transfer watch below), one request per connect and about 30 to 40 MB
 per 30 s, roughly 1 MB/s or 90 GB a day inbound, most of it failed
 transactions the endpoint sends along and
@@ -39,7 +39,7 @@ pump.fun's own frontend API is not used either: its terms forbid bots.
 
 Resilience: the public endpoint drops connections every minute or two, so each
 program is streamed over several connections side by side (PYTHIA_PF_LINKS,
-default 3 for pump.fun, PYTHIA_PF_AMM_LINKS, default 2 for PumpSwap;
+default 3 for pump.fun, PYTHIA_PF_AMM_LINKS, default 3 for PumpSwap (2 before C2);
 duplicates are dropped by signature). Each connection reconnects
 with exponential backoff (0.5 s to 60 s, with jitter). Only when every
 connection of a program is down at once is a "gap" row (from, to) recorded,
@@ -89,6 +89,20 @@ transaction, at most CREATE_CALL_S apart) and stored in the table creates_late, 
 service warms from it), never tapped or handed to the shadow book.
 PumpSwap rows keep the event's base_supply and can_boost. coverage.py reports how complete each day is.
 
+C2 (2026-11-16, the lab's collector only, results/pumpfun_creation_gap.md): on 2026-11-14, 111 of 697 migrated coins
+had no creation row on any day, though each had a completion or migration that asked for its read. The read failed:
+the RPC refuses a version 1 transaction under maxSupportedTransactionVersion 0 (poolread.py now asks for 1), and a
+failed read was never tried again. Now a failed read (RPC error, rate limit, timeout) is tried again CREATE_RETRY_S
+later, doubled each time, at most CREATE_TRIES times; the read pages back CREATE_PAGES pages (C1: 10); a read dropped
+for a full queue may be asked again; every outcome is one line of <data>/pumpfun_rt/late_reads.jsonl (mint, read,
+empty, pages, retry, failed, dropped, with the error), which coverage.py splits by. The PumpSwap stream had 275 to
+603 gaps a day since 2026-11-03 (94 on 11-02), not tied to our load, the jobs, the pump.fun links or the transfer
+link: the public endpoint drops the PumpSwap links more often. So the lab streams PumpSwap over three links (C1: two),
+a link that carried notifications reconnects at once however short it lived (it backed off up to 60 s when it lived
+under 60 s, so one endpoint drop after another kept both links down together), and each drop is one line of
+<data>/pumpfun_rt/links.jsonl (program, link, why, seconds up, notifications, the wait before the next connect) and
+counted per link in the heartbeat ("links"), so coverage.py names the cause of the next day's gaps.
+
 Token transfers (2026-10-29, transfers.py, PYTHIA_PF_TRANSFERS=0 turns it off): every migrated coin's mint is
 watched for 30 minutes on one more connection (`logsSubscribe` mentions <mint>, one subscription per coin), and
 the transactions whose logs show a token transfer and no trade are fetched (`getTransaction`, at most 1.5 a second)
@@ -125,7 +139,7 @@ META_QUEUE = 2_000
 META_PER_S = 1.0
 IPFS_GATEWAY = "https://gateway.pinata.cloud/ipfs/"   # the one public gateway that still answers (see above)
 LINKS = max(1, int(os.environ.get("PYTHIA_PF_LINKS", "3")))            # pump.fun stream
-AMM_LINKS = max(1, int(os.environ.get("PYTHIA_PF_AMM_LINKS", "2")))    # PumpSwap stream
+AMM_LINKS = max(1, int(os.environ.get("PYTHIA_PF_AMM_LINKS", "3")))    # PumpSwap stream (C2: 3, was 2)
 META_MAX_BYTES = 64_000
 META_HOSTS = ("ipfs.io", "dweb.link", "cf-ipfs.com", "nftstorage.link", "arweave.net", "gateway.pinata.cloud",
               "mypinata.cloud", "w3s.link", "4everland.io", "ipfs.dweb.link")
@@ -140,6 +154,11 @@ COMPLETE_WAIT_MS = 20_000  # C1: a completed curve with no migration on the stre
 CREATED_KEEP = 300_000     # C1: mints whose creation row the record has (about ten days of creations)
 CREATE_QUEUE = 200         # C1: lost creations waiting for their read (more are dropped, and counted)
 CREATE_CALL_S = 0.5        # C1: at least this between two calls of the creation read (2 a second, on its own RPC)
+CREATE_PAGES = 50          # C2: the creation read pages back at most 50,000 signatures (C1: 10,000)
+CREATE_TRIES = 4           # C2: a creation read that failed (RPC error, rate limit, timeout) is tried this often at most
+CREATE_RETRY_S = 60.0      # C2: ... the next try this long after a failure, doubled each time
+LOG_MAX_BYTES = 8_000_000  # C2: late_reads.jsonl and links.jsonl are rotated to .1 past this
+LINK_SHORT_S = 60.0        # a link that lived under this before a drop counts as short
 
 
 def now_ms() -> int:
@@ -459,6 +478,9 @@ class Collector:
         self.complete_wait: collections.OrderedDict[str, int] = collections.OrderedDict()
         self.created: collections.OrderedDict[str, None] = collections.OrderedDict()
         self.create_q: asyncio.Queue | None = None
+        self.late_log: Tap | None = None                  # C2: each creation read's outcome (late_reads.jsonl)
+        self.link_log: Tap | None = None                  # C2: each link's drop (links.jsonl)
+        self.link_stats: dict | None = None               # C2, the lab only: per link drops; None keeps C1's backoff
 
     def seen_create(self, mint: str) -> bool:
         """Whether the record has the coin's creation (or its read is asked for); remembers it either way."""
@@ -473,14 +495,29 @@ class Collector:
         if self.seen_create(mint) or self.create_q is None or self.loop is None or not curve:
             return
         try:
-            self.loop.call_soon_threadsafe(self.create_q.put_nowait, (mint, curve))
+            self.loop.call_soon_threadsafe(self.put_create, (mint, curve, 0))
             self.counts["create_missed"] += 1
-        except (RuntimeError, asyncio.QueueFull):
+        except RuntimeError:                              # a closed loop
             self.counts["create_read_dropped"] += 1
+
+    def put_create(self, item: tuple) -> None:
+        """Queue a creation read (from the loop's thread); a full queue drops it, logged, and the coin may be asked
+        for again (C1 counted it as asked and never read it)."""
+        try:
+            self.create_q.put_nowait(item)
+        except asyncio.QueueFull:
+            self.counts["create_read_dropped"] += 1
+            self.created.pop(item[0], None)
+            self.log_late(item[0], "dropped", "", item[2])
+
+    def log_late(self, mint: str, outcome: str, why: str = "", tries: int = 0) -> None:
+        if self.late_log is not None:
+            self.late_log.add({"t": now_ms(), "mint": mint, "outcome": outcome, "why": why[:160], "try": tries})
 
     async def create_worker(self, read=None) -> None:
         """Reads each lost creation (poolread.creation) and stores its row. Only stored: neither the tap (the live
-        service) nor the shadow book gets it, its time is in the past."""
+        service) nor the shadow book gets it, its time is in the past. A failed read is tried again (C2), a curve
+        with more than CREATE_PAGES pages of signatures is not."""
         from . import poolread
         if read is None:
             url, last = poolread.rpc_url(), [0.0]
@@ -489,20 +526,33 @@ class Collector:
                 time.sleep(max(0.0, last[0] + CREATE_CALL_S - time.monotonic()))
                 last[0] = time.monotonic()
                 return poolread.post(url, method, params, timeout=10.0)
-            read = lambda mint, curve: poolread.creation(mint, curve, call)     # noqa: E731
+            read = lambda mint, curve: poolread.creation(mint, curve, call, pages=CREATE_PAGES)     # noqa: E731
         while True:
-            mint, curve = await self.create_q.get()
+            mint, curve, k = await self.create_q.get()
             try:
                 row = await asyncio.to_thread(read, mint, curve)
+            except poolread.TooMany as e:
+                self.counts["create_read_pages"] += 1
+                self.log_late(mint, "pages", str(e), k)
+                continue
             except Exception as e:
                 self.counts["create_read_error"] += 1
+                why = f"{type(e).__name__}: {e}"
                 if self.counts["create_read_error"] <= 5:
-                    print(f"collector: creation of {mint[:8]} not read ({type(e).__name__}: {e})"[:200], flush=True)
+                    print(f"collector: creation of {mint[:8]} not read ({why})"[:200], flush=True)
+                if k + 1 < CREATE_TRIES and self.loop is not None:
+                    self.log_late(mint, "retry", why, k)
+                    self.loop.call_later(CREATE_RETRY_S * 2 ** k, self.put_create, (mint, curve, k + 1))
+                else:
+                    self.counts["create_read_failed"] += 1
+                    self.log_late(mint, "failed", why, k)
                 continue
             if row is None:
                 self.counts["create_read_empty"] += 1
+                self.log_late(mint, "empty", "", k)
                 continue
             self.counts["create_read"] += 1
+            self.log_late(mint, "read", "", k)
             if self.writer is not None:
                 self.writer.add("creates_late", row)
 
@@ -797,6 +847,7 @@ class Collector:
         backoff = 0.5
         while not stop.is_set():
             t_conn = time.monotonic()
+            texts, why = 0, "stopped"
             try:
                 # No websocket pings: the public endpoint does not answer them reliably and a
                 # missed pong closes the link (1006). Liveness is the receive timeout instead.
@@ -810,24 +861,50 @@ class Collector:
                         except asyncio.TimeoutError:
                             print(f"collector: {program[:4]}/{link} silent for {RECV_TIMEOUT_S:.0f} s, reconnecting",
                                   file=sys.stderr)
+                            why = "silent"
                             break
                         if msg.type == aiohttp.WSMsgType.TEXT:
+                            texts += 1
                             self.handle(msg.data, now_ms(), src)
                         elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
                                           aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
                             self.counts["closed"] += 1
+                            why = ("error" if msg.type == aiohttp.WSMsgType.ERROR
+                                   else f"closed {ws.close_code or ''}".strip())
                             break
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
                 # the message of a failed connect can carry the URL, and a provider URL its key: never printed
                 print(f"collector: {program[:4]}/{link} {src} {type(e).__name__}", file=sys.stderr)
+                why = f"{'connect ' if not texts else ''}{type(e).__name__}"
+                status = getattr(e, "status", None)
+                if isinstance(status, int):
+                    why += f" {status}"
             self.link_down(program, link)
             if stop.is_set():
                 break
             self.reconnects += 1
-            if time.monotonic() - t_conn > 60:
+            lived = time.monotonic() - t_conn
+            # C2 (the lab): a link that carried notifications (the first text is the subscription's answer) worked;
+            # the endpoint dropped it, so it comes back at once, however short it lived
+            if lived > 60 or (self.link_stats is not None and texts > 1):
                 backoff = 0.5
-            await asyncio.sleep(backoff * (0.5 + random.random()))
+            wait = backoff * (0.5 + random.random())
+            if self.link_stats is not None:
+                self.note_drop(program, link, why, lived, texts, wait)
+            await asyncio.sleep(wait)
             backoff = min(60.0, backoff * 2)
+
+    def note_drop(self, program: str, link: int, why: str, lived: float, texts: int, wait: float) -> None:
+        """C2: one link's drop, counted per link (heartbeat "links") and logged (links.jsonl, coverage.py)."""
+        name = f"{'PumpSwap' if program == E.PUMP_AMM else 'pump.fun' if program == E.PUMP else program[:8]}/{link}"
+        st = self.link_stats.setdefault(name, collections.Counter())
+        st["drops"] += 1
+        st["short"] += lived < LINK_SHORT_S
+        st["no_data"] += texts <= 1
+        st[why.split(" ")[0]] += 1
+        if self.link_log is not None:
+            self.link_log.add({"t": now_ms(), "link": name, "why": why[:80], "up_s": round(lived, 1),
+                               "texts": texts, "wait_s": round(wait, 2)})
 
     def heartbeat(self) -> dict:
         return {"t": now_ms(), "started_ms": self.started_ms, "connected": dict(self.connected),
@@ -836,7 +913,8 @@ class Collector:
                 "last_write_ms": self.writer.last_write_ms if self.writer else 0,
                 "meta_queue": self.meta_q.qsize() if self.meta_q is not None else None,
                 "first_by_source": dict(self.first_by),
-                "transfers": self.xfer.status() if self.xfer is not None else None}
+                "transfers": self.xfer.status() if self.xfer is not None else None,
+                **({"links": {k: dict(v) for k, v in self.link_stats.items()}} if self.link_stats is not None else {})}
 
 
 def feed_urls(env=None) -> list[str]:
@@ -882,6 +960,10 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     if writer is not None and os.environ.get("PYTHIA_PF_TAP", "1") != "0":
         col.tap = Tap()
     col.backfill = writer is not None                     # C1: never in the live service's collector
+    if col.backfill:                                      # C2: the read outcomes and the link drops, logged
+        col.late_log = Tap(store.base() / "late_reads.jsonl", LOG_MAX_BYTES)
+        col.link_log = Tap(store.base() / "links.jsonl", LOG_MAX_BYTES)
+        col.link_stats = {}
     if col.backfill:                                      # the creations of the last two days are on record
         try:
             two = sorted({store.day_of(now_ms() - 86_400_000), store.day_of(now_ms())})
@@ -1004,8 +1086,9 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
                 store.write_json(hb, col.heartbeat())
             if shadow is not None:
                 shadow.save()
-            if col.tap is not None:
-                col.tap.close()
+            for t in (col.tap, col.late_log, col.link_log):
+                if t is not None:
+                    t.close()
     return col.heartbeat()
 
 
