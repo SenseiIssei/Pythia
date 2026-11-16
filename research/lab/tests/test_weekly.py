@@ -105,6 +105,7 @@ def test_missing_report_said_as_missing(root):
     assert "Leiter: fehlt (`reports/ladder/latest.json`)" in t
     assert "Kapital je Kandidat: fehlt" in t
     assert "Register: 0 Versuche" not in t and "Register:" in t   # from the trial registry instead
+    assert "+ F3-Ledger 0" in t                                     # ladder.register_total, the ladder's own total
 
 
 def test_goal_live_paper_and_capital(root):
@@ -307,3 +308,13 @@ def test_job_in_the_table():
     assert j["schedule"] == "0 18 * * 0" and j["command"] == "python -m lab.ops.weekly" and j["enabled"]
     assert j["kind"] == "lab" and not j["env_files"] and not j.get("network")
     assert "studies" in notify.CATEGORIES
+
+
+def test_the_register_line_is_the_ladders_total(root):
+    # results/trial_audit_prereg.md: the page prints the ladder's one total and the registers it sums
+    write(root, "reports/ladder/latest.json", {"rows": [], "registry": {
+        "n_trials": 7204, "r5_trials": 6119, "f3_trials": 1085, "sr0_annual": 2.91,
+        "families": {"factory": 2134, "hand": 2242, "pumpfun": 146, "small": 1597}}})
+    t = page_text(root)
+    assert "Register: 7.204 Versuche = R5-Register 6.119 (factory 2.134, hand 2.242, pumpfun 146, small 1.597) " \
+           "+ F3-Ledger 1.085, Rauschbalken" in t and "2,91 im Jahr" in t

@@ -8,7 +8,7 @@ the ladder, the books' week, paper minus live, the lanes' results, what is red a
 registry's count and noise bar. German, plain, at most about 40 lines; every line names the file it comes from, a
 missing report is said as missing ("fehlt").
 
-  reports/ladder/latest.json            steps, the registry's count and noise bar (else metrics.trial_pool()), A4's
+  reports/ladder/latest.json            steps, the one trial total (R5 plus F3, else ladder.register_total), A4's
                                         promotions (promotions/live_ready.json)
   reports/pumpfun_rt/realistic.json     the calibration line, P2's gap, R2's and P3's books, sol_eur
   reports/pumpfun_rt/live_status.json   the live bot's total P&L (live_trades.json: its newest closed trades)
@@ -543,16 +543,16 @@ def build(root: Path, now: int) -> dict:
     reg = (lad or {}).get("registry") if isinstance(lad, dict) else None
     f = LADDER
     if not isinstance(reg, dict) or _n(reg.get("n_trials")) is None:
-        try:
-            from .. import metrics
-            reg, f = metrics.trial_pool(), "trials/registry.jsonl"
-        except Exception:                                    # noqa: BLE001 - the page goes out without it
-            reg = None
+        from . import ladder                                 # the ladder's own total (results/trial_audit_prereg.md)
+        reg, f = ladder.register_total(root), "trials/registry.jsonl"
     if reg is None:
         lines.append(missing("Register", "trials/registry.jsonl"))
     else:
-        lines.append(f"Register: {de(reg['n_trials'], 0)} Versuche, Rauschbalken (bester Sharpe aus reinem Rauschen) "
-                     f"{de(_n(reg.get('sr0_annual')) or 0, 2)} im Jahr" + src(f))
+        sums = (f" = R5-Register {de(reg['r5_trials'], 0)} ("
+                + ", ".join(f"{k} {de(v, 0)}" for k, v in (reg.get("families") or {}).items())
+                + f") + F3-Ledger {de(reg['f3_trials'], 0)}") if _n(reg.get("f3_trials")) is not None else ""
+        lines.append(f"Register: {de(reg['n_trials'], 0)} Versuche{sums}, Rauschbalken (bester Sharpe aus reinem "
+                     f"Rauschen, R5s Tagesversuche) {de(_n(reg.get('sr0_annual')) or 0, 2)} im Jahr" + src(f))
     return {"date": today, "lines": lines, "short": short, "snapshot": snap}
 
 

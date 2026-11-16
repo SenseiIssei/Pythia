@@ -648,3 +648,26 @@ def test_the_m4_preregistrations_were_committed_before_their_results():
         if a is None or b is None:
             pytest.skip("no git history")
         assert a[1] != b[1] and a[0] <= b[0]
+
+
+def test_one_total_for_the_header_and_the_pumpfun_dsrs(env):
+    # results/trial_audit_prereg.md: the header, the pump.fun DSRs and the weekly page count R5 plus F3's ledger
+    data, results = env
+    pf_data(data, results, pf_rows("P_pool0", "2026-10-25", 10, 0.0))
+    d = ladder.build(data, NOW, results=results, added=added(PF_COMMITS))
+    reg = d["registry"]
+    r5 = metrics.trial_pool(extra=ladder.pf_trials())["n_trials"]
+    assert reg["r5_trials"] == r5 and reg["f3_trials"] == 60 and reg["n_trials"] == r5 + 60
+    assert reg["families"]["pumpfun"] == 5 and reg["families"]["factory"] == 500
+    st = {x["id"]: x for x in d["rows"][[r["id"] for r in d["rows"]].index("pumpfun:P_pool0")]["steps"]["2"]}
+    assert f"over {reg['n_trials']:,} trials" in st["dsr_all"]["value"]
+    assert f"over {5 + 60:,} pumpfun trials" in st["dsr_family"]["value"]
+    assert reg["sums"].startswith(f"{reg['n_trials']:,} trials = R5's registry") and "plus F3's ledger" in reg["sums"]
+    assert reg["sums"] in ladder.markdown(d)
+
+
+def test_the_total_without_f3_is_r5_alone(env):
+    data, _ = env
+    reg = ladder.register_total(data)
+    assert reg["f3_trials"] == 0 and reg["n_trials"] == reg["r5_trials"] == metrics.trial_pool(
+        extra=ladder.pf_trials())["n_trials"]

@@ -123,6 +123,7 @@ PF_REF_DAYS = 10                        # T8's REF_DAYS: the e-process's scale, 
 PF_REF_SHARPE = 0.1                     # per entry: the e-process's horizon
 PF_MIN_ENTRIES, PF_MIN_DAYS = 20, 10    # R7 (factory.MIN_ENTRIES, MIN_DAYS)
 PF_LEDGER = "paper/pumpfun_rt/ledger.csv"
+F3_LEDGER = "pumpfun_rt/factory/ledger.jsonl"   # F3's pump.fun genomes, per-entry Sharpes, outside R5 by design
 PF_REPORT = "reports/pumpfun_rt/realistic.json"
 
 # The conditions in both languages, for the report and the briefing.
@@ -755,16 +756,11 @@ def pf_context(root: Path, now: int) -> dict:
     since = max(PF_REAL_FROM_MS, int(_num((st or {}).get("realistic_since")) or 0) if isinstance(st, dict) else 0)
     rows, read = _rows(paper / "ledger.csv", PF_RULES)
     fails, _ = _rows(paper / "failed.csv", PF_RULES)
-    f3 = F.read_ledger(root / "pumpfun_rt" / "factory" / "ledger.jsonl")
+    f3 = F.read_ledger(root / F3_LEDGER)
     sharpes, n_f3 = F.pool(f3)
-    n_all = n_fam = None
-    try:
-        from .. import metrics
-        p = metrics.trial_pool(extra=pf_trials())
-        n_all = p["n_trials"] + n_f3
-        n_fam = p["families"].get("pumpfun", {}).get("n_trials", 0) + n_f3
-    except Exception:  # noqa: BLE001 - fails closed: no pool, no DSR passes
-        pass
+    tot = register_total(root)                                # the header's total, the same N (fails closed: None)
+    n_all = tot["n_trials"] if tot else None
+    n_fam = tot["families"].get("pumpfun", 0) + tot["f3_trials"] if tot else None
     lt = notify.read_json(root / "reports" / "pumpfun_rt" / "latest.json")
     lat = {}
     for r in (lt or {}).get("results") or [] if isinstance(lt, dict) else []:
@@ -1032,6 +1028,25 @@ def today_pool() -> dict | None:
         return None
 
 
+def register_total(root: Path) -> dict | None:
+    """The one trial total the ladder, its pump.fun DSRs and the weekly page print (results/trial_audit_prereg.md):
+    R5's registry (every family, with pf_trials) plus F3's ledger, the noise bar of R5's daily trials, and the one
+    line saying which registers it sums; None when R5 cannot be read."""
+    from ..pumpfun_rt import factory as F
+    try:
+        from .. import metrics
+        p = metrics.trial_pool(extra=pf_trials())
+    except Exception:  # noqa: BLE001 - the header's total is information only
+        return None
+    _, n_f3 = F.pool(F.read_ledger(root / F3_LEDGER))
+    fams = {f: x["n_trials"] for f, x in p["families"].items()}
+    n = p["n_trials"] + n_f3
+    return {"n_trials": n, "r5_trials": p["n_trials"], "f3_trials": n_f3, "families": fams,
+            "sr0_annual": p["sr0_annual"],
+            "sums": f"{n:,} trials = R5's registry trials/registry.jsonl {p['n_trials']:,} ("
+                    + ", ".join(f"{f} {k:,}" for f, k in fams.items()) + f") plus F3's ledger {F3_LEDGER} {n_f3:,}"}
+
+
 def build(root: Path | None = None, now: int | None = None, results: Path = RESULTS, added=None) -> dict:
     root = Path(root) if root is not None else notify.data_root()
     now = now or notify.clock_ms()
@@ -1041,13 +1056,7 @@ def build(root: Path | None = None, now: int | None = None, results: Path = RESU
     top = rows[0]["step"] if rows else 0
     headline = (f"{len(rows)} candidates; the highest step is {top} ({STEPS[top]}), "
                 f"{counts[str(top)]} there. Nothing is armed: the ladder only proposes.") if rows else "no candidate"
-    pool = None
-    try:
-        from .. import metrics
-        p = metrics.trial_pool()
-        pool = {"n_trials": p["n_trials"], "sr0_annual": p["sr0_annual"]}
-    except Exception:  # noqa: BLE001 - the header's pool is information only
-        pass
+    pool = register_total(root)
     items = [{"label": r["name"], "value": f"{r['step']} {r['step_name']}", "detail": r["next"] or "-",
               "status": "ok" if r["step"] >= 4 else "watch"} for r in rows[:10]]
     return {"title": "Readiness ladder", "status": "watch", "headline": headline, "updated_ms": now, "items": items,
@@ -1070,7 +1079,8 @@ def markdown(d: dict) -> str:
           "their era, DSR over the registry and the family, PBO), 3 shadow, 4 lockbox, 5 execution (50 EUR), 6 larger "
           "(only the owner). `results/readiness_ladder_prereg.md`. DSR: higher is better, pass at 0.95, as of today's "
           "registry"
-          + (f"; R5's registry holds {reg['n_trials']:,} trials" if reg.get("n_trials") else "") + ". "
+          + (f"; the register: {reg['sums']} (the noise bar {reg['sr0_annual']:.2f} a year from R5's daily trials)"
+             if reg.get("sums") else "") + ". "
           "Open (not blocking, step 1 only): the commit date without git. From step 2 on missing evidence fails. "
           "Nothing here arms anything.\n",
           f"**{d['headline']}**\n",
