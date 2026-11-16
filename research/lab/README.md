@@ -810,7 +810,11 @@ closed by `as_of` (default now); a bar still forming is never complete.
   once an hour). `candles-health` is
   red per pool: each one whose 1h bar is over 3 hours or 1d bar over 2 days
   old, or that has none, is named, followed by what the last `candles-markets` run said (a 429 named as
-  GeckoTerminal's rate limit). Markets and limits: `lab/candles/markets.json`.
+  GeckoTerminal's rate limit). A pool without a trade gets no 1h bar from GeckoTerminal (PAXG from 03:00 to
+  14:00 UTC on 2026-11-16, red 8 runs in a row with every run asking it): one that `candles-markets` asked
+  within the 3 hours, answered with nothing newer than the stored bar, is green and named in the ok line
+  as without a trade, up to the 2 days of the 1d limit (`state.json` gecko.asked per pool timeframe).
+  Markets and limits: `lab/candles/markets.json`.
 - **Storage** under `<data>/candles/source=<s>/asset=<a>/tf=<tf>/`: a
   month's parts, merged into `<YYYY-MM>.parquet` by job `candles-compact`
   (01:40 UTC, finished months final), `manifest.json` (per market and

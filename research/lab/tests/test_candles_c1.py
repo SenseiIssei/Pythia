@@ -672,6 +672,47 @@ def test_health_names_geckoterminals_429_when_pools_are_late(tmp_path, monkeypat
     assert ok and "candles-markets" not in msg and chr(0x2014) not in msg
 
 
+def test_health_is_green_on_a_pool_without_trades_the_collector_asked_and_red_when_not_asked(tmp_path, monkeypatch):
+    # 2026-11-16: PAXG's pool had no trade from 03:00 to 14:00 UTC; each candles-markets run asked it and
+    # GeckoTerminal answered with the bars up to 02:00 (it leaves hours without a trade out), so the newest
+    # 1h bar stayed 3 to 4 h old and candles-health was red 8 times in a row with the collector on time
+    root, now = tmp_path / "d", T0 + DAY + 7 * HOUR + 10 * MIN
+    cfg = {**CFG, "tokens": ["PAXG"], "coins": ["SOL"]}
+    monkeypatch.setattr(S, "config", lambda: cfg)
+    bar = lambda t, p: pl.DataFrame({"open_time_us": [t], "close_time_us": [t + p], "open": [1.0], "high": [1.0],
+                                     "low": [1.0], "close": [1.0]})
+    for src in ("binance_rest", "kraken"):
+        S.write(src, "BTC", "1m", bar(now - 2 * MIN, MIN), now, root)
+    S.write("gecko", "SOL", "1h", bar(now - 2 * HOUR, HOUR), now, root)
+    S.write("gecko", "PAXG", "1h", bar(T0 + DAY + 2 * HOUR, HOUR), now, root)   # the 02:00 bar, 4 h ago
+    for a in ("SOL", "PAXG"):
+        S.write("gecko", a, "1d", bar(T0, DAY), now, root)
+    g = FakeGecko(now - 3 * MIN, T0)                                  # the 07:07 run: PAXG nothing after 02:00
+    quiet = lambda url: ({"data": {"attributes": {"ohlcv_list": [[(T0 + DAY + 2 * HOUR) // 1_000_000, 1, 1, 1, 1, 5.0]]}}}
+                         if "POOL_P/ohlcv/hour" in url else g(url))
+    state = {"gecko": {"pools": {a: {"pool": f"POOL_{a[0]}", "side": "base", "at_us": now} for a in ("PAXG", "SOL")},
+                       "backfilled": {"PAXG": True, "SOL": True}, "liquidity": {"at_us": now, "by": {}}}}
+    csv = tmp_path / "tokens.csv"
+    csv.write_text("symbol,mint,kind\nPAXG,MINT_PAXG,gold\n")
+    ok, msg = S.health(now, root)                                     # no answer recorded: red, as before
+    assert not ok and "gecko 1h: 1 of 2 pools over 3 h (PAXG 4 h)" in msg
+    L.run_gecko(quiet, cfg, state, now - 3 * MIN, root, csv)
+    assert state["gecko"]["asked"]["1h/PAXG"] == {"at_us": now - 3 * MIN, "newest_us": T0 + DAY + 3 * HOUR}
+    L.save_state(state, root)
+    ok, msg = S.health(now, root)
+    assert ok and msg.startswith("Candles ok:") and "gecko 1h 2 pools (no trade at GeckoTerminal since the newest bar, " \
+        "asked 3 min ago: PAXG 4 h)" in msg and chr(0x2014) not in msg
+    ok, msg = S.health(now + 3 * HOUR, root)                          # not asked for 3 h: red again
+    assert not ok and "gecko 1h: 2 of 2 pools over 3 h" in msg and "PAXG 7 h" in msg
+    state["gecko"]["asked"]["1h/PAXG"]["newest_us"] = T0 + DAY + 5 * HOUR   # GeckoTerminal had newer bars: red
+    L.save_state(state, root)
+    assert not S.health(now, root)[0]
+    state["gecko"]["asked"]["1h/PAXG"] = {"at_us": now + 2 * DAY, "newest_us": T0 + DAY + 3 * HOUR}
+    L.save_state(state, root)                                         # no trade for over 2 days: red, a dead pool
+    ok, msg = S.health(now + 2 * DAY, root)
+    assert not ok and "PAXG 52 h" in msg
+
+
 def test_gaps_and_the_report(lake):
     t = np.array([0, 1, 2, 5, 6, 10], dtype=np.int64) * HOUR
     g = S.gaps(t, "1h")

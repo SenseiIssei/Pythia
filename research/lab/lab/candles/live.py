@@ -382,9 +382,13 @@ def run_gecko(get, cfg: dict, state: dict, now: int, root: Path | None = None, t
                     pools[a] = {**best, "at_us": now}
 
     def bars(tf: str, a: str, last: int, liq: float | None) -> int:
-        """The bars since the newest stored."""
+        """The bars since the newest stored; the answer's time and newest closed bar kept in asked (a pool
+        without a trade gets no new bar, so candles-health tells a quiet pool from one not asked)."""
         limit = 1000 if not last else int(min(1000, (now - last) // S.TF[tf] + 2))
-        return S.write("gecko", a, tf, gecko_rows(get(_ohlcv_url(pools[a], tf, limit)), tf, now, liq), now, root)
+        r = gecko_rows(get(_ohlcv_url(pools[a], tf, limit)), tf, now, liq)
+        gs.setdefault("asked", {})[f"{tf}/{a}"] = {"at_us": now, "newest_us": int(r["close_time_us"].max() or 0)
+                                                   if r.height else 0}
+        return S.write("gecko", a, tf, r, now, root)
 
     def backfill(a: str) -> int | None:
         """One step of the 1h history back, as far as the API goes (None: nothing to ask)."""

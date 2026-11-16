@@ -569,7 +569,10 @@ def health(now: int | None = None, root: Path | None = None) -> tuple[bool, str]
     """Red when a live source's newest bar is older than its limit (markets.json stale_min): the Binance
     REST fill and the Kraken candles by their newest, every GeckoTerminal pool (the configured tokens and
     coins and any in the store) on its own, 1h under stale_min gecko, 1d under gecko_1d (2 days); a late pool's
-    line ends with what the last candles-markets run said (pools fetched, left, stopped on HTTP 429)."""
+    line ends with what the last candles-markets run said (pools fetched, left, stopped on HTTP 429). A pool
+    without a trade gets no 1h bar from GeckoTerminal: one whose 1h is late but that candles-markets asked
+    within the 1h limit, answered with nothing newer than the stored bar, is named in the ok line as without a
+    trade, while its newest 1h bar is under the 1d limit (older: red, a dead pool)."""
     now = now or now_us()
     cfg = config()
     lim = cfg.get("stale_min", {})
@@ -591,18 +594,28 @@ def health(now: int | None = None, root: Path | None = None) -> tuple[bool, str]
             ok.append(f"{src} {tf} {age:.0f} min" + (f" (stale: {', '.join(stale[:5])})" if stale else ""))
     pools = list(dict.fromkeys(cfg.get("tokens", []) + cfg.get("coins", []) +
                                sorted({k.split("/")[1] for k in man if k.startswith("gecko/")})))
-    for tf, limit in (("1h", float(lim.get("gecko", 180)) * MIN), ("1d", float(lim.get("gecko_1d", 2880)) * MIN)):
-        late = []
+    asked = markets_state(root).get("asked") or {}
+    day_limit = float(lim.get("gecko_1d", 2880)) * MIN
+    for tf, limit in (("1h", float(lim.get("gecko", 180)) * MIN), ("1d", day_limit)):
+        late, quiet = [], []
         for a in pools:
             e = (man.get(f"gecko/{a}/{tf}") or {}).get("last_end_us")
+            q = asked.get(f"{tf}/{a}") or {}
             if not e:
                 late.append(f"{a} none")
-            elif now - e > limit:
+            elif now - e <= limit:
+                continue
+            elif (tf == "1h" and now - e <= day_limit and now - int(q.get("at_us") or 0) <= limit
+                  and int(q.get("newest_us") or 0) <= e):           # asked in time, nothing newer: no trade since
+                quiet.append((a, e, int(q["at_us"])))
+            else:
                 late.append(f"{a} {(now - e) / HOUR:.0f} h")
         if late:
             bad.append(f"gecko {tf}: {len(late)} of {len(pools)} pools over {limit / HOUR:.0f} h ({', '.join(late)})")
         elif pools:
-            ok.append(f"gecko {tf} {len(pools)} pools")
+            ok.append(f"gecko {tf} {len(pools)} pools" + (
+                f" (no trade at GeckoTerminal since the newest bar, asked {(now - min(q for *_, q in quiet)) / MIN:.0f} "
+                f"min ago: {', '.join(f'{a} {(now - e) / HOUR:.0f} h' for a, e, _ in quiet)})" if quiet else ""))
     if any(b.startswith("gecko") for b in bad):                     # why: the collector's last run, in its words
         run = markets_run(root)
         if run.get("said"):
@@ -615,9 +628,19 @@ def health(now: int | None = None, root: Path | None = None) -> tuple[bool, str]
 
 def markets_run(root: Path | None = None) -> dict:
     """The last candles-markets run as lab.candles.live wrote it in state.json ({} without one)."""
+    return (_state(root).get("runs") or {}).get("markets") or {}
+
+
+def markets_state(root: Path | None = None) -> dict:
+    """lab.candles.live's GeckoTerminal state in state.json (pools, asked: per pool timeframe the last answer's
+    time and newest closed bar), {} without one."""
+    return _state(root).get("gecko") or {}
+
+
+def _state(root: Path | None = None) -> dict:
     for base in reversed(store_dirs(root)):
         try:
-            return (json.loads((base / "state.json").read_text()).get("runs") or {}).get("markets") or {}
+            return json.loads((base / "state.json").read_text())
         except (OSError, ValueError):
             continue
     return {}
