@@ -531,8 +531,12 @@ def test_the_receive_lag_check_reads_the_ledgers_extra_time_over_the_draw():
     g = R.recv_lag(rows, live, since)
     assert g["paper"] == 10 and g["inside"] == 10 and g["verdict"] == "once"
     assert g["extra"]["median"] == pytest.approx(300) and g["live"] == 1 and g["recv"]["median"] == 2200
+    early = rows + [{"rule": "P_pool0", "signal_ms": since, "land_ms": since + 500, "lat_buy_ms": 1500}]
+    g = R.recv_lag(early, live, since)                        # a fill stamped before the landing: less, not more
+    assert g["less"] == 1 and g["more"] == 0 and g["verdict"] == "once"
     rows.append({"rule": "P_pool0_wait", "signal_ms": since, "land_ms": since + 15_000 + 1500, "lat_buy_ms": 1500})
-    assert R.recv_lag(rows, live, since)["verdict"] == "check"   # 15 s more than the draw: the lag added again
+    g = R.recv_lag(rows, live, since)
+    assert g["more"] == 1 and g["verdict"] == "check"         # 15 s more than the draw: the lag added again
 
 
 def test_the_window_report_shows_both_columns_the_new_fits_stamps_and_the_lag():

@@ -1459,8 +1459,9 @@ def window_compare(before: dict, after: dict) -> dict:
 def recv_lag(ledger: list[dict], measured: list[dict], since_ms: int) -> dict:
     """Is the recorder's receive lag in paper's signal to landing once or twice? Paper: the WINDOW_BOOKS rows from
     since_ms with their drawn latency (P1's tainted rows and restarts out): land less signal less the draw, which is
-    only the wait for the next recorded trade (0 to FILL_WAIT_MS) when nothing more is added. Live: what lat_ms spans
-    (recv_ms less signal_ms, the bot's own receive after its slot clock, where recorded)."""
+    only the wait for the next recorded trade (0 to FILL_WAIT_MS) when nothing more is added (below 0: a fill on
+    a trade stamped before the landing, less time, not more); the verdict "once" when no row has more. Live: what
+    lat_ms spans (recv_ms less signal_ms, the bot's own receive after its slot clock, where recorded)."""
     xs = []
     for r in ledger:
         s, ld, lat = _f(r.get("signal_ms")), _f(r.get("land_ms")), _f(r.get("lat_buy_ms"))
@@ -1471,13 +1472,15 @@ def recv_lag(ledger: list[dict], measured: list[dict], since_ms: int) -> dict:
             if r.get("what") == "fill" and r.get("side") == "buy" and r.get("recv_ms") is not None
             and r.get("signal_ms") is not None and r.get("lat_ms") is not None]
     inside = sum(1 for x in xs if -1 <= x <= FILL_WAIT_MS + 1)
+    more = sum(1 for x in xs if x > FILL_WAIT_MS + 1)        # time added beyond the draw and the wait: the lag again
 
     def qs(v):
         return {k: _q(v, q) for k, q in (("p10", 0.1), ("median", 0.5), ("p90", 0.9))} | {
             "max": max(v) if v else None}
     return {"paper": len(xs), "extra": qs(xs), "inside": inside, "share": inside / len(xs) if xs else None,
+            "more": more, "less": sum(1 for x in xs if x < -1),
             "live": len(live), "recv": qs([a for a, _ in live]), "lat": qs([b for _, b in live]),
-            "verdict": "once" if xs and inside == len(xs) else "check"}
+            "verdict": "once" if xs and not more else "check"}
 
 
 def window_markdown(res: dict) -> str:
@@ -1528,7 +1531,8 @@ def window_markdown(res: dict) -> str:
            f"Paper ledger, {', '.join(WINDOW_BOOKS)} from the ladder's window (P1's tainted rows and restarts out), "
            f"{lag['paper']} rows: land less signal less the drawn latency p10 {sec(e['p10'])}, median "
            f"{sec(e['median'])}, p90 {sec(e['p90'])}, max {sec(e['max'])}; {lag['inside']} of {lag['paper']} within "
-           f"0 to {FILL_WAIT_MS / 1000:.0f} s (the wait for the next recorded trade). Live buys with a receive time "
+           f"0 to {FILL_WAIT_MS / 1000:.0f} s (the wait for the next recorded trade), {lag.get('less', 0)} below 0, "
+           f"{lag.get('more', 0)} above. Live buys with a receive time "
            f"({lag['live']}): received a median {sec(r['median'])} after their signal time (p90 {sec(r['p90'])}), "
            f"signal to landing median {sec(lt['median'])}.", ""]
     md += res.get("lag_text") or []
