@@ -1425,3 +1425,146 @@ def test_paper_m4_perps_gets_the_heavy_lock_on_the_study_nights(day):
     out = replay_heavy_night(t, day, {**PAPER_NIGHTS[day], **MORNING}, since=12, hours=8, last="paper-m4-perps")
     assert out.get("paper-m4-perps") == "ok", out
     assert set(out.values()) == {"ok"}, out
+
+
+# ---- the disk breakdown (results/disk_breakdown_prereg.md): a fake root with docker, logs, lanes, the data folder
+
+MB = 1024 ** 2
+
+
+def _fill(p: Path, n_mb: float) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "ab") as f:
+        f.write(os.urandom(int(n_mb * MB)))
+
+
+def _files(root: Path) -> set[str]:
+    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+
+
+def parts_table(tmp_path, monkeypatch, docker):
+    t = table(tmp_path, '  - name: a\n    schedule: "0 4 * * *"\n    command: x', """
+datasets:
+  - name: books
+    path: paper
+  - name: job-runs
+    path: _ops/runs
+""")
+    root = tmp_path / "root"
+    t.data, t.disk_root = root / "srv" / "pythia-data", root
+    _fill(t.data / "paper" / "j.csv", 1)
+    _fill(t.data / "live" / "state.json", 0.5)
+    _fill(t.data / "_ops" / "runs" / "2026-11.jsonl", 0.2)
+    _fill(root / "var" / "lib" / "docker" / "overlay2" / "l1" / "f", 3)
+    _fill(root / "var" / "lib" / "docker" / "containers" / "c1" / "c1-json.log", 1)
+    _fill(root / "var" / "log" / "journal" / "m" / "system.journal", 1)
+    _fill(root / "var" / "log" / "pythia" / "paper.log", 0.2)
+    _fill(root / "var" / "log" / "syslog", 0.5)
+    _fill(root / "opt" / "pythia-agent" / "lane-work" / "x", 1)
+    _fill(root / "srv" / "pythia-backup" / "a.tar.gz", 1)
+    _fill(root / "root" / ".cache" / "pip" / "w", 0.5)
+    _fill(root / "weird" / "stuff" / "f", 0.2)
+    _fill(root / "swapfile", 1)
+    state = {"docker": docker, "unseen": 10 * MB}
+    monkeypatch.setattr(jobs, "_docker_df", lambda: (state["docker"], "") if state["docker"] else
+                        (None, "docker is not installed where jobs.py runs"))
+    monkeypatch.setattr(jobs, "_deleted_open", lambda dev, proc=None: 3 * MB)
+
+    class Usage:
+        def __init__(self):
+            used = jobs._du_tree(root)[0][""] + 3 * MB + state["unseen"]
+            self.total, self.used, self.free = 100 * 1024 ** 3, used, 100 * 1024 ** 3 - used
+    monkeypatch.setattr(jobs.shutil, "disk_usage", lambda p: Usage())
+    return t, root, state
+
+
+def test_disk_parts_attribute_the_untracked_growth_and_remove_nothing(tmp_path, monkeypatch):
+    t, root, state = parts_table(tmp_path, monkeypatch, {"docker images": 2 * MB, "docker build cache": 1 * MB})
+    day0 = datetime(2026, 11, 14, 5, 7, tzinfo=UTC)
+    first = jobs.measure_disk(t, day0)
+    assert first["breakdown"] == "reports/disk/breakdown.md" and first["coverage"] is None, "no growth before day 2"
+    parts = {r["part"]: r for r in json.loads((t.data / "reports" / "disk" / "breakdown.json").read_text())["parts"]}
+    assert {"docker images", "docker build cache", "docker other", "docker container logs", "journald", "job logs",
+            "other logs", "research lanes", "backups", "caches outside the data folder", "swap", "data: live",
+            "data: tracked datasets", "other /weird", "deleted, still open", "not seen"} <= set(parts)
+    assert "data: paper" not in parts, "a dataset's folder is tracked"
+    assert parts["data: _ops"]["bytes"] < 0.2 * MB, "_ops/runs is a dataset, the disk history is not"
+    assert parts["data: tracked datasets"]["kind"] == "tracked"
+    assert parts["not seen"]["bytes"] == 10 * MB and parts["swap"]["bytes"] >= MB
+    assert parts["other logs"]["bytes"] < MB, "journald and the job logs are not counted again in the other logs"
+    assert parts["data: live"]["readBy"].startswith("unknown") and parts["journald"]["proposal"].startswith("thin")
+    assert jobs.measure_disk(t, day0 + timedelta(hours=6))["breakdownAt"] == jobs._iso(day0), "once a day"
+    before = _files(root)
+    # two days on: the build cache and a container's log grow, the journal a little, an unknown folder a bit
+    _fill(root / "var" / "lib" / "docker" / "overlay2" / "l2" / "f", 4)
+    state["docker"] = {"docker images": 2 * MB, "docker build cache": 5 * MB}
+    _fill(root / "var" / "lib" / "docker" / "containers" / "c1" / "c1-json.log", 2)
+    _fill(root / "var" / "log" / "journal" / "m" / "system.journal", 0.5)
+    _fill(root / "weird" / "stuff" / "g", 0.1)
+    out = jobs.measure_disk(t, day0 + timedelta(days=2))
+    b = json.loads((t.data / "reports" / "disk" / "breakdown.json").read_text())
+    assert [p["part"] for p in out["topGrowing"]] == ["docker build cache", "docker container logs"]
+    assert b["parts"][0]["bytesPerDay"] == pytest.approx(2 * MB, rel=0.05)
+    assert b["coverage"] >= 0.9 and b["coverageOk"] and b["spanDays"] == 2.0
+    assert b["unread"] == [] and b["walkCut"] is False
+    md = (t.data / "reports" / "disk" / "breakdown.md").read_text()
+    assert "| **docker build cache** | /var/lib/docker |" in md and "every folder was read" in md
+    assert "\u2014" not in md
+    checks = {n: (ok, d) for n, ok, d in jobs.health_checks(t, day0 + timedelta(days=2, hours=1))}
+    assert "growing most, docker build cache" in checks["disk"][1]
+    assert before <= _files(root), "nothing on disk was removed or moved"
+    assert len(jobs._read_jsonl(t.ops_dir / "disk" / "parts.jsonl")) == 2
+
+
+def test_disk_parts_without_docker_and_with_the_recordings(tmp_path, monkeypatch):
+    t, root, _state = parts_table(tmp_path, monkeypatch, None)
+    rec = t.data / "reports" / "recordings" / "latest.json"
+    rec.parent.mkdir(parents=True)
+    rec.write_text(json.dumps({"rows": [
+        {"path": "live", "parent": None, "verdict": "read by a book or job",
+         "readers": ["job:a", "job:b", "job:c", "book:d"]},
+        {"path": "live/x", "parent": "live", "verdict": "read by nobody", "readers": []}]}))
+    b = jobs.measure_parts(t, datetime(2026, 11, 14, tzinfo=UTC), force=True)
+    parts = {r["part"]: r for r in b["parts"]}
+    assert "docker" in parts and "docker images" not in parts
+    assert {"path": "/var/lib/docker", "why": "not split: docker is not installed where jobs.py runs"} in b["unread"]
+    assert parts["data: live"]["readBy"] == "read by a book or job: job:a, job:b, job:c and 1 more"
+    assert parts["data: live"]["proposal"] == "keep"
+    (tmp_path / "x").mkdir()
+    assert jobs.measure_parts(table(tmp_path / "x", '  - name: a\n    schedule: "0 4 * * *"\n    command: x')) is None
+
+
+def test_du_tree_lists_what_it_cannot_read_and_a_cut_walk(tmp_path, monkeypatch):
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    du = bin_ / "du"
+    du.write_text("#!/bin/sh\nfor a; do r=$a; done\nprintf '4096\\t%s/a\\n8192\\t%s\\n' \"$r\" \"$r\"\n"
+                  "echo \"du: cannot read directory '$r/secret': Permission denied\" >&2\nexit 1\n")
+    du.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_}:{os.environ['PATH']}")
+    sizes, unread, cut = jobs._du_tree(tmp_path)
+    assert sizes == {"a": 4096, "": 8192} and not cut
+    assert unread == [{"path": f"{tmp_path}/secret", "why": "Permission denied"}]
+    du.write_text("#!/bin/sh\nfor a; do r=$a; done\nprintf '4096\\t%s/a\\n' \"$r\"\nexec sleep 5\n")
+    sizes, unread, cut = jobs._du_tree(tmp_path, timeout_s=1)
+    assert cut and "du cut after 1 s" in unread[-1]["why"]
+
+
+def test_docker_sizes_are_powers_of_1000():
+    assert jobs._docker_bytes("1.5GB") == 1_500_000_000 and jobs._docker_bytes("512kB") == 512_000
+    assert jobs._docker_bytes("0B") == 0 and jobs._docker_bytes("12.3 MB") == 12_300_000
+    assert jobs._docker_bytes("n/a") is None
+
+
+def test_disk_red_under_21_days_left(tmp_path):
+    t = table(tmp_path, '  - name: a\n    schedule: "0 4 * * *"\n    command: x', "datasets:\n  - name: d\n    path: d\n")
+    gb = 1024 ** 3
+    hist = tmp_path / "data" / "_ops" / "disk" / "history.jsonl"
+    hist.parent.mkdir(parents=True, exist_ok=True)
+    for fall, ok in ((4, True), (5, False)):            # 88 GB at 4 a day: 22 days; 85 GB at 5 a day: 17 days
+        hist.write_text("".join(json.dumps({"at": f"2026-11-{d:02d}T05:07:02Z", "free": int((100 - fall * (d - 13)) * gb),
+                                            "total": int(463.9 * gb), "sizes": {"d": 0}}) + "\n" for d in (13, 14, 15, 16)))
+        out = jobs.measure_disk(t, datetime(2026, 11, 16, 6, 0, tzinfo=UTC))
+        assert out["ok"] is ok and (out["daysLeft"] < 21) is not ok
+        detail = dict((n, d) for n, _ok, d in jobs.health_checks(t, datetime(2026, 11, 16, 6, 0, tzinfo=UTC)))["disk"]
+        assert ("red under 21 days" in detail) is not ok

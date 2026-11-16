@@ -341,3 +341,23 @@ def test_a_red_leak_is_a_red_line_on_the_page(root):
     assert "spec abc" not in t and "Lecks: 1 rot" in page["short"]
     assert page["snapshot"]["leaks"] == ["book tranches_filtered tsmom_tranches_lowkr"]
     assert len([ln for ln in page["lines"] if ln.strip()]) <= weekly.MAX_LINES
+
+
+def test_disk_line_from_the_fall_and_days_left(root):
+    # _ops/disk/latest.json of 2026-11-16: the page said "Daten 32,5 GB, wachsen 0,72 GB am Tag, voll in 37 Tagen",
+    # the tracked growth next to days left that come from the fall in free space
+    disk = {"freeGb": 166.7, "totalGb": 463.9, "growthGbPerDay": 0.723, "freeFallGbPerDay": {"3d": 4.66, "7d": 5.39},
+            "daysLeft": 30.9, "trackedGb": 32.7, "untrackedGb": 264.5,
+            "topGrowing": [{"part": "docker build cache", "gbPerDay": 2.1}, {"part": "journald", "gbPerDay": 0.8}]}
+    write(root, "_ops/disk/latest.json", disk)
+    t = page_text(root)
+    line = next(ln for ln in t.splitlines() if ln.startswith("Platte:"))
+    assert "fällt 5,39 GB am Tag, voll in 31 Tagen" in line
+    assert round(disk["freeGb"] / 5.39) == round(disk["daysLeft"]) == 31     # the line agrees with daysLeft
+    assert "wächst am meisten: docker build cache +2,10 GB am Tag, journald +0,80 GB am Tag" in line
+    assert "Datensätze 32,7 GB, +0,72 GB am Tag" in line and "reports/disk/breakdown.md" in line
+    assert "wachsen 0,72" not in line
+    disk.update(freeFallGbPerDay={"3d": -1.0, "7d": None}, daysLeft=None, topGrowing=[])
+    write(root, "_ops/disk/latest.json", disk)
+    line = next(ln for ln in page_text(root).splitlines() if ln.startswith("Platte:"))
+    assert "kein Volllaufen absehbar" in line and "wächst am meisten" not in line

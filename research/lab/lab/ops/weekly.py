@@ -553,12 +553,21 @@ def build(root: Path, now: int) -> dict:
     if not isinstance(dk, dict):
         lines.append(missing("Platte", DISK))
     else:
+        # days left and the fall they come from (the faster of 3 and 7 days, as jobs.measure_disk), then the two
+        # parts that grow most (reports/disk/breakdown.md) and the tracked datasets apart from them
         left = _n(dk.get("daysLeft"))
+        fall = max((_n(v) for v in (dk.get("freeFallGbPerDay") or {}).values() if _n(v) is not None), default=None)
+        top = [p for p in dk.get("topGrowing") or [] if isinstance(p, dict) and _n(p.get("gbPerDay")) is not None][:2]
         lines.append(f"Platte: {de(_n(dk.get('freeGb')) or 0, 1)} von {de(_n(dk.get('totalGb')) or 0, 1)} GB frei, "
-                     f"Daten {de(_n(dk.get('trackedGb')) or 0, 1)} GB, wachsen {de(_n(dk.get('growthGbPerDay')) or 0, 2)} "
-                     f"GB am Tag, " + (f"voll in {de(left, 0)} Tagen" if left is not None else "kein Volllaufen absehbar")
-                     + src(DISK))
-        short.append(f"Platte: {de(_n(dk.get('freeGb')) or 0, 0)} GB frei")
+                     + (f"fällt {de(fall, 2)} GB am Tag, voll in {de(left, 0)} Tagen" if left is not None and fall
+                        else "kein Volllaufen absehbar")
+                     + ("; wächst am meisten: " + ", ".join(f"{p.get('part')} {de(_n(p['gbPerDay']), 2, True)} GB am Tag"
+                                                           for p in top) if top else "")
+                     + f"; Datensätze {de(_n(dk.get('trackedGb')) or 0, 1)} GB, "
+                     f"{de(_n(dk.get('growthGbPerDay')) or 0, 2, True)} GB am Tag"
+                     + src(DISK, *(["reports/disk/breakdown.md"] if top else [])))
+        short.append(f"Platte: {de(_n(dk.get('freeGb')) or 0, 0)} GB frei"
+                     + (f", voll in {de(left, 0)} Tagen" if left is not None and fall else ""))
     reg = (lad or {}).get("registry") if isinstance(lad, dict) else None
     f = LADDER
     if not isinstance(reg, dict) or _n(reg.get("n_trials")) is None:

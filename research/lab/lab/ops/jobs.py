@@ -12,7 +12,8 @@ and does the rest:
   python3 jobs.py run <job> [--force]      run one job the way cron does
   python3 jobs.py status [--write]         last run, next run, failures (JSON)
   python3 jobs.py checks                   one line per check for system_health.sh
-  python3 jobs.py disk                     data growth per dataset (JSON)
+  python3 jobs.py disk [--now] [--parts]   data growth per dataset (JSON); --parts walks the disk now
+                                           (reports/disk/breakdown.md, otherwise once a day)
   python3 jobs.py prune [--dry-run]        apply the retention rules
   python3 jobs.py backup [--dry-run]       archive the important state, rotate
   python3 jobs.py restore-test             unpack the newest archive, compare checksums
@@ -384,6 +385,9 @@ class Table:
         self.cron_dir = Path(p.get("cron_dir", "/etc/cron.d"))
         self.alert_env = p.get("alert_env", "/etc/pythia/alerts.env")
         self.min_free_gb = float(p.get("min_free_gb", 20))
+        # the disk breakdown's walk (measure_parts): paths.disk_root, else / on the server's data folder, else none
+        self.disk_root = Path(p["disk_root"]) if p.get("disk_root") else \
+            Path("/") if self.data == Path("/srv/pythia-data") else None
         self.log_max_bytes = int(float(p.get("log_max_mb", 10)) * 1024 * 1024)
         self.log_keep = int(p.get("log_keep", 5))
         self.defaults = raw.get("defaults") or {}
@@ -1217,11 +1221,13 @@ def _used(h: dict) -> int | None:
     return None if h.get("free") is None or h.get("total") is None else h["total"] - h["free"]
 
 
-def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600, force: bool = False) -> dict:
+def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600, force: bool = False,
+                 force_parts: bool = False) -> dict:
     """Size per dataset and free space; measured at most every `every_s`, kept as history.
     Days left come from the fall in free space over 3 and 7 days (the faster one), not from the
     tracked folders alone: what fills the disk outside them (docker, caches) counts too and is
-    reported as the untracked use (used minus the tracked folders)."""
+    reported as the untracked use (used minus the tracked folders), split into parts once a day by
+    measure_parts (reports/disk/breakdown.md)."""
     now = now or _now()
     d = t.ops_dir / "disk"
     hist_path = d / "history.jsonl"
@@ -1269,7 +1275,7 @@ def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600,
     falls = {k: _free_fall(hist, cur, n) for k, n in (("3d", 3), ("7d", 7))}
     fall = max((v for v in falls.values() if v is not None), default=None)
     days_left = (free / fall) if free is not None and fall is not None and fall > 0 else None
-    disk_ok = free is not None and free / gb >= t.min_free_gb and (days_left is None or days_left >= 14)
+    disk_ok = free is not None and free / gb >= t.min_free_gb and (days_left is None or days_left >= DAYS_LEFT_RED)
     tracked = sum(cur["sizes"].values())
     used = _used(cur)
     untracked = None if used is None else max(used - tracked, 0)
@@ -1284,8 +1290,426 @@ def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600,
            "trackedGb": round(tracked / gb, 1), "untrackedGb": None if untracked is None else round(untracked / gb, 1),
            "untrackedGrowthGbPerDay": None if untracked_growth is None else round(untracked_growth / gb, 2),
            "datasets": rows}
+    # where the untracked use goes, by part (once a day, on the host; a failure never stops the health check)
+    try:
+        parts = measure_parts(t, now, out, force=force_parts)
+    except Exception as e:                                   # noqa: BLE001
+        parts, out["breakdownError"] = None, f"{type(e).__name__}: {e}"[:300]
+    if parts is not None:
+        out["breakdown"] = "reports/disk/breakdown.md"
+        out["breakdownAt"] = parts["at"]
+        out["coverage"] = parts["coverage"]
+        out["topGrowing"] = [{"part": r["part"], "gbPerDay": r["gbPerDay"]} for r in parts["parts"]
+                             if r["kind"] != "tracked" and (r["bytesPerDay"] or 0) > 0][:2]
     _write_json(d / "latest.json", out)
     return out
+
+
+# ================================================================ the untracked use, by part
+
+DAYS_LEFT_RED = 21                 # the disk row is red when the disk would be full sooner
+PARTS_EVERY_S = 20 * 3600          # the breakdown is measured once a day (the walk takes minutes)
+PARTS_DEPTH = 4                    # du's depth: var/lib/docker/containers, <data>/<folder>/<sub>
+PARTS_DU_TIMEOUT_S = 300
+DOCKER_DIR = "var/lib/docker"
+DOCKER_DF = {"Images": "docker images", "Containers": "docker containers", "Local Volumes": "docker volumes",
+             "Build Cache": "docker build cache"}
+DOCKER_READS = {
+    "docker images": ("the containers and every job's docker run",
+                      "thin: docker image prune (the untagged images each rebuild leaves; tagged ones stay)"),
+    "docker containers": ("the running containers (their writable layer)",
+                          "keep; a container that writes into its layer should get a volume (move)"),
+    "docker volumes": ("the containers that mount them", "check: docker volume ls -f dangling=true, then thin"),
+    "docker build cache": ("docker build (bootstrap.sh, deploy_lab.sh, the lanes' agent image)",
+                           "thin: docker builder prune --filter until=168h (a rebuild takes longer once)"),
+    "docker other": ("docker itself", "check: du -xh --max-depth=2 /var/lib/docker"),
+}
+# name, paths under the disk root (a nested path is its own part and left out of the outer one), who reads it,
+# the proposal. Each path is measured only where it exists.
+DISK_PARTS = [
+    ("docker container logs", ("var/lib/docker/containers",), "docker logs",
+     "thin: \"log-opts\": {\"max-size\": \"50m\", \"max-file\": \"3\"} in /etc/docker/daemon.json (new containers; "
+     "recreate the running ones at a planned restart)"),
+    ("containerd", ("var/lib/containerd",), "docker (images when containerd stores them)",
+     "thin: as docker images"),
+    ("journald", ("var/log/journal",), "journalctl (nothing of Pythia)",
+     "thin: SystemMaxUse=2G in /etc/systemd/journald.conf, systemctl restart systemd-journald"),
+    ("job logs", ("var/log/pythia",), "the owner (jobs.py rotates them by size)", "keep"),
+    ("other logs", ("var/log",), "the owner (the hand-written cron files log to /var/log/pythia-*.log)",
+     "compress: a logrotate rule for /var/log/pythia-*.log (weekly, rotate 4, compress)"),
+    ("research lanes", ("opt/pythia-agent",), "the lanes and the research agent (worktrees, runs, logs)",
+     "thin: the worktree is made again each run; old logs can go"),
+    ("lanes /out", ("srv/pythia-agent-out",), "the lane that runs (its copy of reports, caches, trials)",
+     "thin: emptied for each run except the trials; what a finished lane left can go"),
+    ("lane records", ("root/pythia-lanes",), "the owner (each lane's task, mbox, verdict)",
+     "compress: tar the done/ folders older than 30 days"),
+    ("backups", ("srv/pythia-backup",), "restore-test, the off-server copy", "keep (7 daily and 4 weekly archives)"),
+    ("code copies", ("opt/pythia-src", "opt/pythia-lab", "opt/pythia-live", "opt/pythia-ops", "opt/pythia-recorder"),
+     "the jobs, services and the live bots", "keep"),
+    ("caches outside the data folder", ("root/.cache", "root/.npm", "root/.cargo", "root/.rustup", "tmp", "var/tmp",
+                                        "var/cache"),
+     "pip, npm, cargo, apt (rebuilt on demand)", "thin: apt-get clean, npm cache clean --force, rm what is in /tmp"),
+    ("system", ("usr", "boot", "snap", "var/lib/snapd", "var/lib/apt"), "the operating system", "keep"),
+]
+SWAP_FILES = ("swapfile", "swap.img")
+_DU_ERR = re.compile(r"^du: cannot [a-z ]+? '(.+)': (.+)$")
+_DOCKER_SIZE = re.compile(r"^\s*([0-9.]+)\s*([kKMGTP]?)B\s*$")
+
+
+def _du_tree(root: Path, depth: int = PARTS_DEPTH, timeout_s: int = PARTS_DU_TIMEOUT_S):
+    """({path relative to root: bytes on disk}, [{path, why} du could not read], cut) of one `du -x` walk; the
+    root itself is ''. `cut` when the walk ran past the timeout (what it had by then is kept)."""
+    cmd = ["du", "-x", "-B1", f"--max-depth={depth}", str(root)]
+    if shutil.which("nice"):
+        cmd = ["nice", "-n", "19"] + cmd
+    cut = False
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, check=False)
+        out, err = r.stdout, r.stderr
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        cut = True
+    except OSError as e:
+        return {}, [{"path": str(root), "why": f"du failed: {e}"}], False
+    sizes = {}
+    for line in out.splitlines():
+        n, _, p = line.partition("\t")
+        try:
+            rel = os.path.relpath(p, root)
+            sizes["" if rel == "." else rel] = int(n)
+        except ValueError:
+            pass
+    unread = []
+    for line in err.splitlines():
+        m = _DU_ERR.match(line.strip())
+        if m:
+            unread.append({"path": m.group(1), "why": m.group(2)})
+        elif line.strip():
+            unread.append({"path": "?", "why": line.strip()[:200]})
+    if cut:
+        unread.append({"path": str(root), "why": f"du cut after {timeout_s} s: the folders it had not finished are missing"})
+    return sizes, unread, cut
+
+
+def _docker_bytes(s: str) -> int | None:
+    m = _DOCKER_SIZE.match(str(s))
+    if not m:
+        return None
+    return int(float(m.group(1)) * 1000 ** " kMGTP".index(m.group(2).replace("K", "k") or " "))
+
+
+def _docker_df() -> tuple[dict | None, str]:
+    """({part name: bytes} of `docker system df` (docker's sizes are powers of 1000), '') or (None, why)."""
+    if not shutil.which("docker"):
+        return None, "docker is not installed where jobs.py runs"
+    try:
+        r = subprocess.run(["docker", "system", "df", "--format", "{{json .}}"], capture_output=True, text=True,
+                           timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"docker system df failed: {e}"
+    if r.returncode != 0:
+        return None, f"docker system df exit {r.returncode}: {(r.stderr or '').strip()[:200]}"
+    out = {}
+    for line in r.stdout.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        name, b = DOCKER_DF.get(row.get("Type")), _docker_bytes(row.get("Size", ""))
+        if name and b is not None:
+            out[name] = b
+    return (out, "") if out else (None, "docker system df gave no sizes")
+
+
+def _deleted_open(dev: int, proc: Path = Path("/proc")) -> int:
+    """Bytes on disk of the files on device `dev` that are deleted but still open (once per inode)."""
+    seen, total = set(), 0
+    try:
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
+    except OSError:
+        return 0
+    for pid in pids:
+        fd_dir = proc / pid / "fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if not os.readlink(fd_dir / fd).endswith(" (deleted)"):
+                    continue
+                st = os.stat(fd_dir / fd)
+            except OSError:
+                continue
+            if st.st_dev == dev and stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) not in seen:
+                seen.add((st.st_dev, st.st_ino))
+                total += st.st_blocks * 512
+    return total
+
+
+def _under(p: str, q: str) -> bool:
+    """`p` strictly below `q` (relative paths, '' the root)."""
+    return q == "" and p != "" or p.startswith(q + "/")
+
+
+def _rest(sizes: dict, path: str, claims) -> int:
+    """`path`'s bytes less those of the topmost claimed paths below it."""
+    inner = [c for c in claims if _under(c, path) and c in sizes]
+    top = [c for c in inner if not any(_under(c, o) for o in inner if o != c)]
+    return max(sizes.get(path, 0) - sum(sizes[c] for c in top), 0)
+
+
+def _children(sizes: dict, path: str) -> list[str]:
+    n = 0 if path == "" else path.count("/") + 1
+    return sorted(k for k in sizes if k != "" and k.count("/") == n and (path == "" or k.startswith(path + "/")))
+
+
+def attribute(sizes: dict, t: Table, root: Path, docker: dict | None, swap: dict | None = None) -> list[dict]:
+    """The walk split into parts: the named parts, docker split by `docker system df`, the data folder's tracked
+    datasets and each of its other top-level folders, and an `other /x` or `other /x/y` part for every folder one
+    and two levels down that holds bytes no named part claims. [{name, bytes, kind, paths}]."""
+    swap = swap or {}
+    try:
+        data = os.path.relpath(t.data, root)
+    except ValueError:
+        data = None
+    if data is not None and (data == "." or data.startswith("..")):
+        data = None
+    named = [(n, p) for n, ps, _r, _a in DISK_PARTS for p in ps]
+    claims = {p for _n, p in named} | {DOCKER_DIR} | ({data} if data else set())
+    parts: dict[str, dict] = {}
+
+    def add(name, b, kind, path):
+        e = parts.setdefault(name, {"name": name, "bytes": 0, "kind": kind, "paths": []})
+        e["bytes"] += max(int(b), 0)
+        if path is not None and "/" + path not in e["paths"]:
+            e["paths"].append("/" + path)
+
+    for name, p in named:
+        if p in sizes:
+            add(name, _rest(sizes, p, claims), "named", p)
+    if DOCKER_DIR in sizes:
+        rest = _rest(sizes, DOCKER_DIR, claims)
+        if docker:
+            split = sum(docker.values())
+            scale = min(1.0, rest / split) if split else 0.0       # docker counts apparent bytes, du blocks
+            for name in DOCKER_DF.values():
+                if name in docker:
+                    add(name, docker[name] * scale, "docker", DOCKER_DIR)
+            add("docker other", rest - split * scale, "docker", DOCKER_DIR)
+        else:
+            add("docker", rest, "docker", DOCKER_DIR)
+    if data and data in sizes:
+        ds_paths = [str(ds["path"]).strip("/") for ds in t.datasets]
+        for sub in _children(sizes, data):
+            top = sub[len(data) + 1:]
+            if top in ds_paths:
+                add("data: tracked datasets", sizes[sub], "tracked", None)
+                continue
+            inner = [f"{data}/{p}" for p in ds_paths if p.startswith(top + "/")]
+            tracked = sum(sizes[s] for s in inner if s in sizes
+                          and not any(_under(s, o) for o in inner if o != s and o in sizes))
+            if tracked:
+                add("data: tracked datasets", tracked, "tracked", None)
+            add(f"data: {top}", sizes[sub] - tracked, "data", sub)
+        add("data: files in the root", sizes[data] - sum(sizes[s] for s in _children(sizes, data)), "data", data)
+    for name, b in swap.items():
+        add("swap", b, "named", name)
+    for top in _children(sizes, ""):
+        if top in claims:
+            continue
+        if not any(_under(c, top) for c in claims):
+            add(f"other /{top}", sizes[top], "other", top)
+            continue
+        kids = _children(sizes, top)
+        for sub in kids:
+            if sub not in claims:
+                add(f"other /{sub}", _rest(sizes, sub, claims), "other", sub)
+        add(f"other /{top} (files)", sizes[top] - sum(sizes[k] for k in kids), "other", top)
+    if "" in sizes:
+        add("other / (files)", sizes[""] - sum(sizes[k] for k in _children(sizes, "")) - sum(swap.values()),
+            "other", "")
+    return [p for p in parts.values() if p["bytes"] > 0]
+
+
+def _readers(t: Table) -> dict[str, dict]:
+    """{top-level folder of the data root: T13's row} from reports/recordings/latest.json."""
+    doc = _read_json(t.data / "reports" / "recordings" / "latest.json")
+    rows = doc.get("rows") if isinstance(doc, dict) else None
+    return {str(r.get("path")): r for r in rows or [] if isinstance(r, dict) and not r.get("parent")}
+
+
+def _who_and_what(part: dict, rec: dict[str, dict]) -> tuple[str, str]:
+    name = part["name"]
+    for n, _ps, who, what in DISK_PARTS:
+        if n == name:
+            return who, what
+    if name in DOCKER_READS:
+        return DOCKER_READS[name]
+    if name == "docker":
+        return "the containers and jobs", "check: docker system df -v"
+    if name == "swap":
+        return "the kernel", "keep"
+    if name == "data: tracked datasets":
+        return "see reports/recordings/latest.md (T13)", "keep (each dataset has its own limit and retention)"
+    if name == "deleted, still open":
+        return "the process that holds them", "check: find it in ls -l /proc/*/fd | grep deleted, restart it"
+    if name == "not seen":
+        return "-", "check: the folders du could not read (below); else filesystem metadata"
+    if name.startswith("data: "):
+        r = rec.get(name[6:])
+        if r is None:
+            return "unknown (not in reports/recordings/latest.json)", "check"
+        rd = r.get("readers") or []
+        who = (", ".join(rd[:3]) + (f" and {len(rd) - 3} more" if len(rd) > 3 else "")) if rd else "nobody"
+        return f"{r.get('verdict')}: {who}", r.get("proposal") or ("keep" if rd else "check")
+    return "unknown", f"check: du -xh --max-depth=1 {part['paths'][0] if part['paths'] else '/'}"
+
+
+def _read_jsonl(p: Path) -> list[dict]:
+    out = []
+    if p.exists():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+    return out
+
+
+def measure_parts(t: Table, now: datetime | None = None, cur: dict | None = None, force: bool = False,
+                  every_s: int = PARTS_EVERY_S) -> dict | None:
+    """The used space split into parts by path (see results/disk_breakdown_prereg.md), measured at most every
+    `every_s` into <data>/_ops/disk/parts.jsonl; each part's growth a day against the oldest entry 1 to 8 days
+    back; written to <data>/reports/disk/breakdown.json and .md. None without a disk root (Table.disk_root).
+    Reads only: nothing is deleted, moved or stopped."""
+    if t.disk_root is None:
+        return None
+    now = now or _now()
+    hist_path = t.ops_dir / "disk" / "parts.jsonl"
+    hist = _read_jsonl(hist_path)
+    last_at = _parse_iso(hist[-1].get("at")) if hist else None
+    if force or last_at is None or (now - last_at).total_seconds() >= every_s:
+        root = t.disk_root
+        sizes, unread, cut = _du_tree(root)
+        docker, docker_why = (_docker_df() if DOCKER_DIR in sizes else (None, ""))
+        swap = {}
+        for f in SWAP_FILES:
+            try:
+                st = os.lstat(root / f)
+                if stat.S_ISREG(st.st_mode):
+                    swap[f] = st.st_blocks * 512
+            except OSError:
+                pass
+        parts = {p["name"]: p for p in attribute(sizes, t, root, docker, swap)}
+        try:
+            dev = os.stat(root).st_dev
+            deleted = _deleted_open(dev)
+        except OSError:
+            deleted = 0
+        if deleted:
+            parts["deleted, still open"] = {"name": "deleted, still open", "bytes": deleted, "kind": "named", "paths": []}
+        try:
+            du = shutil.disk_usage(root)
+            used = du.used
+        except OSError:
+            used = None
+        seen = sum(p["bytes"] for p in parts.values())
+        if used is not None and used > seen:
+            parts["not seen"] = {"name": "not seen", "bytes": used - seen, "kind": "unread", "paths": []}
+        if docker is None and docker_why:
+            unread.append({"path": "/" + DOCKER_DIR, "why": f"not split: {docker_why}"})
+        entry = {"at": _iso(now), "root": str(root), "used": used, "cut": cut, "unread": unread[:200],
+                 "parts": {n: p["bytes"] for n, p in parts.items()},
+                 "kinds": {n: p["kind"] for n, p in parts.items()}, "paths": {n: p["paths"] for n, p in parts.items()}}
+        hist.append(entry)
+        hist_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(hist_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, sort_keys=True) + "\n")
+    out = breakdown(t, hist, cur)
+    _write_json(t.data / "reports" / "disk" / "breakdown.json", out)
+    md = t.data / "reports" / "disk" / "breakdown.md"
+    tmp = md.with_name(f".{md.name}.{os.getpid()}.tmp")
+    tmp.write_text(breakdown_md(out), encoding="utf-8")
+    os.replace(tmp, md)
+    return out
+
+
+def breakdown(t: Table, hist: list[dict], cur: dict | None = None) -> dict:
+    """The newest entry of the parts history as rows with growth a day, who reads each and a proposal."""
+    gb = 1024 ** 3
+    last = hist[-1]
+    at = _parse_iso(last["at"])
+    base = next((h for h in hist if _parse_iso(h.get("at")) and
+                 timedelta(days=1) <= at - _parse_iso(h["at"]) <= timedelta(days=8)), None)
+    days = (at - _parse_iso(base["at"])).total_seconds() / 86400 if base else None
+    rec = _readers(t)
+    rows = []
+    for name, b in last["parts"].items():
+        g = (b - base["parts"].get(name, 0)) / days if base else None
+        part = {"name": name, "paths": last.get("paths", {}).get(name) or []}
+        who, what = _who_and_what(part, rec)
+        rows.append({"part": name, "kind": last.get("kinds", {}).get(name), "paths": part["paths"], "bytes": b,
+                     "gb": round(b / gb, 2), "gbPerDay": None if g is None else round(g / gb, 3),
+                     "bytesPerDay": None if g is None else int(g), "readBy": who, "proposal": what})
+    if base:                                         # a part gone since the base shrank to 0
+        for name, b in base["parts"].items():
+            if name not in last["parts"]:
+                rows.append({"part": name, "kind": base.get("kinds", {}).get(name), "paths": [], "bytes": 0, "gb": 0.0,
+                             "gbPerDay": round(-b / days / gb, 3), "bytesPerDay": int(-b / days), "readBy": "-",
+                             "proposal": "gone"})
+    rows.sort(key=lambda r: (-(r["bytesPerDay"] or 0), -r["bytes"]))
+    untracked = [r for r in rows if r["kind"] != "tracked"]
+    grow = [r for r in untracked if (r["bytesPerDay"] or 0) > 0]
+    named = sum(r["bytesPerDay"] for r in grow if r["kind"] not in ("other", "unread"))
+    total = sum(r["bytesPerDay"] for r in grow)
+    cov = None if not base else (round(named / total, 3) if total > 0 else 1.0)
+    return {"at": last["at"], "root": last.get("root"), "baseAt": None if not base else base["at"],
+            "spanDays": None if days is None else round(days, 2),
+            "usedGb": None if last.get("used") is None else round(last["used"] / gb, 1),
+            "untrackedGb": round(sum(r["bytes"] for r in untracked) / gb, 1),
+            "untrackedGbPerDay": None if not base else round(sum(r["bytesPerDay"] for r in untracked) / gb, 2),
+            "coverage": cov, "coverageOk": None if cov is None else cov >= 0.9,
+            "walkCut": bool(last.get("cut")), "unread": last.get("unread") or [],
+            "disk": None if not cur else {k: cur.get(k) for k in ("freeGb", "totalGb", "freeFallGbPerDay", "daysLeft")},
+            "parts": rows}
+
+
+def breakdown_md(b: dict) -> str:
+    d = b.get("disk") or {}
+    fall = max((v for v in (d.get("freeFallGbPerDay") or {}).values() if v is not None), default=None)
+    lines = [f"# Disk: where the space goes ({str(b['at'])[:10]})", "",
+             "`results/disk_breakdown_prereg.md`. One `du -x` walk of the disk's root a day, docker split by "
+             "`docker system df`, files deleted but still open; growth a day against the walk 1 to 8 days earlier. "
+             "It reads only: nothing was deleted, moved or stopped. The owner decides.", ""]
+    if d:
+        lines.append(f"Free {d.get('freeGb')} of {d.get('totalGb')} GB, "
+                     + (f"falling {fall} GB a day, full in {d['daysLeft']} days" if d.get("daysLeft") is not None
+                        else "not falling") + f" (red under {DAYS_LEFT_RED} days).")
+    span = "no walk 1 to 8 days back yet, growth follows tomorrow" if b["baseAt"] is None \
+        else f"growth over {b['spanDays']} days since {b['baseAt']}"
+    lines.append(f"Used {b['usedGb']} GB, outside the tracked datasets {b['untrackedGb']} GB"
+                 + ("" if b["untrackedGbPerDay"] is None else f", {b['untrackedGbPerDay']:+.2f} GB a day")
+                 + f"; {span}.")
+    if b["coverage"] is not None:
+        lines.append(f"Named parts cover {b['coverage'] * 100:.0f} % of the untracked growth"
+                     + ("." if b["coverageOk"] else " (under 90 %: see the other parts and the unread paths)."))
+    lines += ["", "| part | paths | GB | GB a day | read by | proposal |", "|---|---|--:|--:|---|---|"]
+    small = [r for r in b["parts"] if r["gb"] < 0.1 and abs(r["gbPerDay"] or 0) < 0.01]
+    top = [r for r in b["parts"] if r["kind"] != "tracked" and (r["bytesPerDay"] or 0) > 0][:2]   # bold: grow most
+    small = [r for r in small if r not in top]
+    for r in b["parts"]:
+        if r in small:
+            continue
+        name = f"**{r['part']}**" if r in top else r["part"]
+        lines.append(f"| {name} | {', '.join(r['paths'][:3]) or '-'} | {r['gb']:.2f} | {'-' if r['gbPerDay'] is None else f"{r['gbPerDay']:+.3f}"} | "
+                     f"{r['readBy']} | {r['proposal']} |")
+    if small:
+        lines.append(f"| {len(small)} smaller parts | | {sum(r['gb'] for r in small):.2f} | | | |")
+    lines += ["", "## Not read"]
+    lines += [f"- `{u['path']}`: {u['why']}" for u in b["unread"]] or ["- nothing: every folder was read"]
+    return "\n".join(lines) + "\n"
 
 
 def health_checks(t: Table, now: datetime | None = None) -> list[tuple[str, bool, str]]:
@@ -1308,7 +1732,10 @@ def health_checks(t: Table, now: datetime | None = None) -> list[tuple[str, bool
             if disk.get("daysLeft") is not None else ""
         other = f", {disk['untrackedGb']} GB used outside the tracked folders" \
             if disk.get("untrackedGb") is not None else ""
-        out.append(("disk", disk["ok"], f"{disk['freeGb']} GB free of {disk['totalGb']}{left}{other}"))
+        top = "".join(f", {p['part']} {p['gbPerDay']:+} GB a day" for p in disk.get("topGrowing") or [])
+        top = f" (growing most{top})" if top else ""
+        red = f", red under {DAYS_LEFT_RED} days" if (disk.get("daysLeft") or DAYS_LEFT_RED) < DAYS_LEFT_RED else ""
+        out.append(("disk", disk["ok"], f"{disk['freeGb']} GB free of {disk['totalGb']}{left}{red}{other}{top}"))
     ages = {ds["name"]: ds["max_age_h"] for ds in t.datasets if ds.get("max_age_h") is not None}
     for ds in disk["datasets"]:
         g = "" if ds["growthGbPerDay"] is None else f", {ds['growthGbPerDay']:+} GB a day"
@@ -1733,7 +2160,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{name}\t{'true' if ok else 'false'}\t{detail}".replace("\n", " "))
             return 0
         if cmd == "disk":
-            print(json.dumps(measure_disk(t, force="--now" in flags), indent=2))
+            print(json.dumps(measure_disk(t, force="--now" in flags, force_parts="--parts" in flags), indent=2))
             return 0
         if cmd == "prune":
             print(json.dumps(prune(t, dry_run="--dry-run" in flags), indent=2))

@@ -109,7 +109,7 @@ another image, or on the host), resources, timeout, lock, dependencies,
 | `jobs.py run <job> [--force]` | runs one job the way cron does (`--force` runs a disabled one and skips the dependency check) |
 | `jobs.py status [--write]` | last run, next run, failures of every job, as JSON |
 | `jobs.py checks` | the health check's rows: every job, the disk, every dataset |
-| `jobs.py disk [--now]` | size and growth per dataset, the fall in free space over 3 and 7 days, the untracked use |
+| `jobs.py disk [--now] [--parts]` | size and growth per dataset, the fall in free space over 3 and 7 days, the untracked use; `--parts` walks the whole disk now (`reports/disk/breakdown.md`) |
 | `jobs.py prune [--dry-run]` | the retention rules |
 | `jobs.py backup [--dry-run]` | archive the important state, rotate |
 | `jobs.py restore-test` | unpack the newest archive into a temporary folder, compare every file's checksum |
@@ -183,15 +183,46 @@ deployed yet are in the table with `enabled: false`.
 The `datasets` section of the table names each folder of the data lake. The
 health check measures them (at most every 6 hours, `_ops/disk/history.jsonl`)
 and turns red when free space is under `min_free_gb`, when the disk would be
-full within 14 days at the faster fall in free space over the last 3 or 7 days
+full within 21 days at the faster fall in free space over the last 3 or 7 days
 (the whole disk, not only the tracked folders: docker images and caches count),
 when a dataset is over its `max_gb`, or when the newest file of a dataset with
 `max_age_h` is older than that many hours (`etf/daily`, kept fresh by `etf-daily`, and `pokemon` have one
 too). The disk row also says how much is used outside the tracked folders
-(`untrackedGb` in `_ops/disk/latest.json`). A dataset with `retention_days` loses files older than that (by
+(`untrackedGb` in `_ops/disk/latest.json`) and the two parts that grow most (see below). A dataset with `retention_days` loses files older than that (by
 modification time, only names matching its `pattern`, never through a
 symlink) in the nightly `prune` job; the others are never deleted from. See
 it first: `python3 /opt/pythia-ops/jobs.py prune --dry-run`.
+
+### Where the untracked use goes
+
+On 2026-11-16 the tracked datasets were 32.7 GB growing 0.72 GB a day, while 264.5 GB were used outside them and
+grew 4.5 GB a day; the whole data folder is about 35 GB, so nearly all of it is outside `/srv/pythia-data`. Once a
+day (at most every 20 h) the health check's `measure_disk` also walks the whole disk on the host
+(`measure_parts`, `results/disk_breakdown_prereg.md`): one `du -x -B1 --max-depth=4 /` (cut after 5 minutes),
+`docker system df`, and the files deleted but still open (`/proc/*/fd`). The walk is split into parts:
+
+| part | paths |
+|---|---|
+| docker images, containers, volumes, build cache, other | `/var/lib/docker`, split by `docker system df` (only `docker` when it cannot run) |
+| docker container logs | `/var/lib/docker/containers` (the json logs of the running containers) |
+| containerd, journald, job logs, other logs | `/var/lib/containerd`, `/var/log/journal`, `/var/log/pythia`, the rest of `/var/log` |
+| research lanes, lanes /out, lane records | `/opt/pythia-agent`, `/srv/pythia-agent-out`, `/root/pythia-lanes` |
+| backups, code copies | `/srv/pythia-backup`, `/opt/pythia-{src,lab,live,ops,recorder}` |
+| caches outside the data folder, system, swap | `/root/.cache`, `.npm`, `.cargo`, `.rustup`, `/tmp`, `/var/tmp`, `/var/cache`; `/usr`, `/boot`, `/snap`, ...; `/swapfile` |
+| data: tracked datasets, data: `<folder>` | the datasets of the table; every other top-level folder of the data root by itself |
+| other `/x`, other `/x/y` | every folder one or two levels down that no part above claims |
+| deleted, still open; not seen | the open deleted files; the used space the walk did not see (metadata, unreadable folders) |
+
+The T4 book_depth backfill writes inside the data folder (`book_depth`, a tracked dataset). Each walk is a line of
+`_ops/disk/parts.jsonl`; a part's growth a day is against the walk 1 to 8 days earlier. The result is
+`reports/disk/breakdown.md` and `.json`: per part its GB, GB a day, who reads it (for a data folder the readers
+from `reports/recordings/latest.json`, T13), a proposal (keep, thin, compress, move, stop, or check for an unknown
+folder, with the command), the share of the untracked growth the named parts cover (`coverage`, 90 % or more is the
+aim), and every path du could not read with its reason. It deletes, moves and stops nothing. `latest.json` gets
+`topGrowing` (the two parts that grow most), the disk row of the health check and the weekly page name them, and
+the weekly page's disk line shows the fall a day and the days left from `freeFallGbPerDay` and `daysLeft`, with the
+tracked datasets apart. To walk now: `python3 /opt/pythia-ops/jobs.py disk --parts`. The walk uses `/` when the
+table's data folder is `/srv/pythia-data`; another layout sets `paths.disk_root`.
 
 ## Backup
 
