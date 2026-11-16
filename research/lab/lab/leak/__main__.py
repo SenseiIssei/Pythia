@@ -1,5 +1,6 @@
 """The weekly leak check (job leak-check, T1): every feature, the zoo's feature builders, the active G2 shadows' specs,
-the paper books' weight functions and their panel builder through the harness; reports/leak/latest.md and .json.
+the paper books' weight functions and their panel builder through the harness, and since T1b the ladder's books on
+other data (other_books); reports/leak/latest.md and .json.
 
   python -m lab.leak                 everything
   python -m lab.leak --only books    one part: features, zoo, specs, books
@@ -56,10 +57,47 @@ def books() -> list[dict]:
             out.append(checks.book(name, fn, w7p[name]() if name in w7p else P))
         except Exception as e:          # noqa: BLE001 (its panel could not be built)
             out.append(_failed("book", name, e))
+    out += other_books(P)
     del P
     long = fc.build_daily_panel()
     long = long.filter(pl.col("day") > long["day"].max() - PANEL_DAYS * checks.DAY)
     out.append(checks.panel_builder(long, fc.perp_daily_for(int(long["day"].max()))))
+    return out
+
+
+def other_books(P) -> list[dict]:
+    """The ladder's books on other data (results/leak_coverage_prereg.md): EQ1's five rules on their closes, S2's two
+    on their market (the panel P and SPY's and GLD's closes in <data>/etf/daily), and funding_carry, m4_perps and
+    m4_hl_small on the xs_daily panel in the lab cache with each M4 book's cached model. A book whose data is
+    missing is one red result with the error, the rest still run."""
+    import json
+    from functools import cache
+
+    from ..experiments import etf_books_eq1 as eq1, etf_trend as et, smallaccount_s2 as s2
+    from ..paper import m4_hl_small, m4_ls as m4, m4_perps, smallaccount
+
+    closes = cache(lambda: eq1.load(to=None))
+    market = cache(lambda: s2.market(P, {s: et.parse_stooq((et.CACHE / f"{s}.csv").read_text(encoding="utf-8"))
+                                         for s in ("SPY", "GLD")}, 1.0, {}))        # the lab's copy, never fetched
+    xp = cache(lambda: checks.xs_panel(m4.CACHE / "xs_daily_panel.parquet"))
+
+    def m4_book(name: str, cfg: dict) -> dict:
+        import lightgbm as lgb
+        f = m4.CACHE / f"{name}_{cfg['model']}"
+        meta = json.loads(f.with_suffix(".json").read_text(encoding="utf-8"))
+        return checks.xs_book(name, xp(), lgb.Booster(model_file=str(f.with_suffix(".txt"))), meta)
+
+    todo = [(f"etf_books {bk}", lambda bk=bk: checks.eq1_book(bk, closes())) for bk in eq1.BOOKS]
+    todo += [(f"smallaccount small40_{k}", lambda k=k: checks.s2_book(k, market())) for k in smallaccount.S2_PICKS]
+    todo += [("funding_carry", lambda: checks.xs_book("funding_carry", xp())),
+             ("m4_perps", lambda: m4_book("m4_perps", m4_perps.CONFIG)),
+             ("m4_hl_small", lambda: m4_book("m4_hl_small", m4_hl_small.CONFIG))]
+    out = []
+    for name, fn in todo:
+        try:
+            out.append(fn())
+        except Exception as e:          # noqa: BLE001 (its data missing: said, the rest still runs)
+            out.append(_failed("book", name, e))
     return out
 
 

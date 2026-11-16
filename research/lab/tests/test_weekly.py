@@ -318,3 +318,26 @@ def test_the_register_line_is_the_ladders_total(root):
     t = page_text(root)
     assert "Register: 7.204 Versuche = R5-Register 6.119 (factory 2.134, hand 2.242, pumpfun 146, small 1.597) " \
            "+ F3-Ledger 1.085, Rauschbalken" in t and "2,91 im Jahr" in t
+
+
+def test_a_red_leak_is_a_red_line_on_the_page(root):
+    """T1b (results/leak_coverage_prereg.md): the page said all jobs were green while the health check had a red
+    leak; now every red line of the leak report is on it, with its reason."""
+    from lab.ops import jobs
+    assert weekly.LEAK_RED == jobs.LEAK_RED
+    t = page_text(root)
+    assert "Leck-Prüfung (T1): fehlt (`reports/leak/latest.json`)" in t
+    write(root, "reports/leak/latest.json", {"generated": "2026-11-01T06:02:35+00:00", "checked": 134, "red": 2,
+                                             "results": [
+        {"kind": "book", "name": "tranches_filtered tsmom_tranches_lowkr", "ok": False,
+         "why": "leak: ARBUSDT at 2023-06-08 moves when the data after 2023-06-08 changes (shift, shuffle)"},
+        {"kind": "spec", "name": "abc", "ok": False, "why": "leak"},
+        {"kind": "book", "name": "families", "ok": True, "why": "no leak"}]})
+    page = weekly.build(root, NOW)
+    t = "\n".join(page["lines"])
+    assert "Leck-Prüfung (T1) vom 2026-11-01: 1 rot von 134 geprüft" in t
+    assert ("Leck book tranches_filtered tsmom_tranches_lowkr: leak: ARBUSDT at 2023-06-08 moves when the data "
+            "after 2023-06-08 changes (shift, shuffle) (`reports/leak/latest.json`)") in t
+    assert "spec abc" not in t and "Lecks: 1 rot" in page["short"]
+    assert page["snapshot"]["leaks"] == ["book tranches_filtered tsmom_tranches_lowkr"]
+    assert len([ln for ln in page["lines"] if ln.strip()]) <= weekly.MAX_LINES

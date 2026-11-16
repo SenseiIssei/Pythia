@@ -110,7 +110,8 @@ EQ1_JSON = "etf_books_eq1.json"     # EQ1's study numbers per book, variant and 
 # A paper book's name in T1's weekly leak check (lab.leak.checks.book_functions).
 LEAK_NAMES = {"tsmom": "families", "tsmom_regime": "families", "tsmom_top20": "families",
               "breakout_top10": "families", "memes_rotation": "memes", "memes_tsmom": "memes",
-              "btc_gated": "btc_gated", "perps_neutral": "perps_neutral lowvol"}
+              "btc_gated": "btc_gated", "perps_neutral": "perps_neutral lowvol", "funding_carry": "funding_carry",
+              "m4_perps": "m4_perps", "m4_hl_small": "m4_hl_small"}
 
 # The pump.fun rules judged per trade (results/ladder_pumpfun_prereg.md): rule -> (pre-registration, a realistic
 # paper book: E_d0_x1 runs on the old paper model only, P_pool0 is the same rule realistic).
@@ -125,6 +126,16 @@ PF_MIN_ENTRIES, PF_MIN_DAYS = 20, 10    # R7 (factory.MIN_ENTRIES, MIN_DAYS)
 PF_LEDGER = "paper/pumpfun_rt/ledger.csv"
 F3_LEDGER = "pumpfun_rt/factory/ledger.jsonl"   # F3's pump.fun genomes, per-entry Sharpes, outside R5 by design
 PF_REPORT = "reports/pumpfun_rt/realistic.json"
+# Books T1 does not apply to, the check that applies instead and why (results/leak_coverage_prereg.md): a decision,
+# not a gap. pump.fun's passes when its paper ledger was read (P1's rule applied), onchain_meme's always.
+LEAK_NA = {
+    "pumpfun": ("not applicable: an event rule on the live pump.fun stream, decided when a trade arrives, no panel "
+                "or rows a function reads; instead P1's taint rule on its paper ledger (a fill before its signal or "
+                "an exit decided before the landing is out)", PF_LEDGER),
+    "onchain_meme": ("not applicable: decided on each run's live snapshot and filled at a live Jupiter quote, no "
+                     "history its rules read, so nothing after a decision can reach it; forward record only",
+                     "results/leak_coverage_prereg.md"),
+}
 
 # The conditions in both languages, for the report and the briefing.
 COND = {
@@ -335,6 +346,12 @@ def leak_cond(c: dict, ctx: dict) -> dict:
         held = c.get("held_day")
         return cond("leak", False, "no clean leak record" + (" (held back before T1)" if held and held < T1_FROM
                                                              else ""), c["leak_ok_path"])
+    na = "pumpfun" if c.get("family") == "pumpfun" or c["name"].startswith("pumpfun_") else \
+        "onchain_meme" if c["name"].startswith("onchain_meme_") else None
+    if na:
+        why, path = LEAK_NA[na]
+        ok = na != "pumpfun" or ctx.get("pf") is not None
+        return cond("leak", ok, why if ok else why + "; no paper ledger read", path)
     rep = ctx["leak_report"]
     if rep is None:
         return cond("leak", False, "not checked (no T1 report)", "reports/leak/latest.json")
@@ -909,7 +926,8 @@ def candidates(root: Path, now: int) -> list[dict]:
             logged = int(fdays[n]["days"])
         out[f"book:{n}"] = {"id": f"book:{n}", "name": n, "kind": "book", "study": b["study"], "source": "book",
                             "bench": bench, "prereg": pre, "family": fam, "r10": r10, "first_day": b.get("start"),
-                            "leak_name": f"smallaccount {n}" if b["study"] in ("S1", "S2") else LEAK_NAMES.get(n),
+                            "leak_name": f"smallaccount {n}" if b["study"] in ("S1", "S2") else
+                            f"etf_books {b['eq1'].get('book')}" if isinstance(b.get("eq1"), dict) else LEAK_NAMES.get(n),
                             "days_logged": logged, "days_path": f"paper/{n}/journal.csv" if j.exists() else b["report"],
                             "tainted": b.get("tainted") or 0, "p3": b.get("p3"),
                             **({"eq1": b["eq1"], "eq1_book": b["eq1"].get("book"), "eq1_topup": b["eq1"].get("topup")}

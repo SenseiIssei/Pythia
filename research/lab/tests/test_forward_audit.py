@@ -160,3 +160,15 @@ def test_an_audit_reads_journals_and_lists_what_it_cannot_replay(tmp_path):
     assert res["books"]["tsmom"] == {"replayed": False, "why": "no journal"}
     md = fa.markdown({**res, "generated": "2026-10-21", "slippage": None})
     assert "pumpfun_migration" in md and "no backtest signal" in md
+
+
+def test_the_lowkr_record_is_frozen_through_t1bs_fix(tmp_path, monkeypatch):
+    """results/leak_coverage_prereg.md: the rows through 2026-11-16 ran the old Upbit guard, a fresh record after."""
+    monkeypatch.setattr(report, "REPORTS", tmp_path / "reports")
+    cut, why = fr.FROZEN["tsmom_tranches_lowkr"]
+    assert cut == "2026-11-16" and "leak check" in why and "kr_premium_xs" in why
+    journal = [{"date": d, "equity": e, "turnover": "0.1", "paper_cost_bps": "1", "model_cost_bps": "1"}
+               for d, e in (("2026-11-15", "9836.91"), ("2026-11-16", "9834.09"), ("2026-11-17", "9840.00"))]
+    row = fr.book_row("tsmom_tranches_lowkr", journal)
+    assert row["frozen"]["frozen_days"] == 2 and row["days"] == 1 and row["sentence"].startswith(
+        "Fresh record since 2026-11-16")

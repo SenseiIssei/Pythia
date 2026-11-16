@@ -16,6 +16,7 @@ missing report is said as missing ("fehlt").
   lab.ops.paper_books                   every paper book's wallet
   reports/lanes/*.json                  the lanes' tasks closed in the week
   _health/jobs.json                     the red jobs and since when
+  reports/leak/latest.json              T1's red leaks, each a red line in the health check
   _ops/disk/latest.json                 disk and data growth
 
 No new number: the reports' numbers and the pre-registered arithmetic (a week against the page's own snapshot of
@@ -54,6 +55,9 @@ LIVE_TRADES = "reports/pumpfun_rt/live_trades.json"
 REVIEW = "reports/paper_review/latest.json"
 JOBS = "_health/jobs.json"
 DISK = "_ops/disk/latest.json"
+LEAK = "reports/leak/latest.json"
+LEAK_RED = ("feature", "candles", "zoo", "book")    # jobs.LEAK_RED: the kinds the health check makes red
+LEAK_ROWS = 4                   # red leaks named on the page, the rest counted
 PAPER = "reports/{pumpfun_rt/realistic,smallaccount/latest,onchain_longterm/latest,forward/latest}.json"  # paper_books
 
 
@@ -257,7 +261,7 @@ def build(root: Path, now: int) -> dict:
     real = real if isinstance(real, dict) else None
     sol_eur = _n((real or {}).get("sol_eur"))
     books = book_rows(root, now, sol_eur)
-    snap = {"date": today, "now_ms": now, "books": {}, "ladder": {}, "failing": [], "live_pnl_sol": None}
+    snap = {"date": today, "now_ms": now, "books": {}, "ladder": {}, "failing": [], "leaks": [], "live_pnl_sol": None}
     for b in books:
         snap["books"][b["name"]] = [b["value"], b["currency"]]
     lines = [f"# Pythia, Woche bis {today}", ""]
@@ -527,6 +531,21 @@ def build(root: Path, now: int) -> dict:
         if back:
             lines.append("Wieder grün seit der Vorwoche: " + ", ".join(back) + src(JOBS, prev["file"]))
         short.append(f"Rot: {len(red)} Jobs" + (f" ({', '.join(snap['failing'][:4])})" if red else ""))
+    # T1's red leaks (results/leak_coverage_prereg.md): every red line the health check has, not only red jobs.
+    lk = read(LEAK)
+    if not isinstance(lk, dict):
+        lines.append(missing("Leck-Prüfung (T1)", LEAK))
+    else:
+        bad = [r for r in lk.get("results") or [] if isinstance(r, dict) and not r.get("ok")
+               and r.get("kind") in LEAK_RED]
+        snap["leaks"] = [f"{r.get('kind')} {r.get('name')}" for r in bad]
+        lines.append(f"Leck-Prüfung (T1) vom {str(lk.get('generated') or '?')[:10]}: {len(bad)} rot von "
+                     f"{int(_n(lk.get('checked')) or 0)} geprüft" + src(LEAK))
+        lines += [f"Leck {r.get('kind')} {r.get('name')}: {str(r.get('why') or r.get('error') or 'Leck')[:160]}"
+                  + src(LEAK) for r in bad[:LEAK_ROWS]]
+        if len(bad) > LEAK_ROWS:
+            lines.append(f"und {len(bad) - LEAK_ROWS} weitere" + src(LEAK))
+        short.append(f"Lecks: {len(bad)} rot")
 
     # ---- disk, data, the registry
     lines += ["", "## Platte, Daten, Register"]

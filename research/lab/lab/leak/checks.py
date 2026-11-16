@@ -11,7 +11,9 @@
              only the inputs (FEATURES), not the targets, are compared
   spec       a G2 spec: its features as the target's panel has them and its G1 trees (tree_column) on that panel
   book       a paper book's weight function on a fam_common.Panel, compared as held (NaN "leave it" carried
-             forward); and the panel builder (fam_common.panel_from) on its long frame
+             forward); and the panel builder (fam_common.panel_from) on its long frame. T1b
+             (results/leak_coverage_prereg.md): EQ1's rules on their closes, S2's on their market, and funding_carry,
+             m4_perps and m4_hl_small from the xs_daily panel's rows to their daily choice
 
 Each returns check()'s dict with "kind" and "name". A table's own reading of raw files is not part of a feature's
 check (the raw rows are where "known at" is set: registry and store say how).
@@ -414,3 +416,93 @@ def panel_builder(long: pl.DataFrame, perp: pl.DataFrame, n_cuts: int = 3) -> di
 
 
 PANEL_FIELDS = ("px", "ret", "alive", "traded", "adv28", "sigma", "eligible", "perp_ok", "funding", "btc_on")
+
+
+# ---------------------------------------------------------------- the ladder's other books (T1b)
+# results/leak_coverage_prereg.md: EQ1's ETF rules on their closes, S2's rules on their market, and the books on the
+# xs_daily panel (funding_carry, m4_perps, m4_hl_small) from its ranked features to their daily choice. The pump.fun
+# and onchain_meme books have no such function (event rules on live streams): the ladder names their check instead.
+
+def eq1_targets(book: str):
+    """EQ1's targets of one rule at every close (T, the funds), what etf_books_eq1.targets says from the closes up
+    to t; when it decides (the calendar) is not part of it."""
+    from ..experiments import etf_books_eq1 as eq1
+
+    def fn(C) -> np.ndarray:
+        W = np.zeros((C.T, len(C.names)))
+        for t in range(C.T):
+            for s, x in eq1.targets(book, C, t).items():
+                W[t, C.names.index(s)] = x
+        return W
+    return fn
+
+
+def eq1_book(book: str, C, n_cuts: int = 3) -> dict:
+    """One EQ1 rule on etf_books_eq1's closes (both wallets of a rule, once and plus50, share its targets)."""
+    name = f"etf_books {book}"
+    return _tag(check(eq1_targets(book), C, n_cuts=n_cuts, columns=list(C.names), name=name), "book", name)
+
+
+def s2_book(key: str, m, n_cuts: int = 3) -> dict:
+    """An S2 rule's targets (smallaccount_s2.candidate) on the market the paper book builds from the panel and the
+    ETF closes; the days it may trade are the calendar's."""
+    from ..experiments import smallaccount_s2 as s2
+    keys = s2.candidate(key, m)[0]
+    name = f"smallaccount small40_{key}"
+    return _tag(check(lambda x: s2.candidate(key, x)[1], m, n_cuts=n_cuts, columns=keys, name=name), "book", name)
+
+
+XS_DAYS = 400                           # the xs_daily books on the panel's newest 400 days
+
+
+def xs_panel(path: Path, days: int = XS_DAYS) -> pl.DataFrame:
+    """The xs_daily panel the books read (the lab cache, never rebuilt here), its newest `days`, known at the day's
+    end."""
+    p = pl.scan_parquet(path)
+    last = p.select(pl.col("day").max()).collect().item()
+    return p.filter(pl.col("day") > last - days * DAY).collect().with_columns(known_us=pl.col("day") + DAY)
+
+
+def xs_choice(name: str, booster=None):
+    """The book's choice per day from the panel's rows: xs_daily.ranked as m4_ls.live_panel calls it, then
+    funding_carry's tranche, or M4's candidates with the book's model and its rank buffer day after day (every
+    perp listed and trading: the listing is read at run time, not from the history). Rows (known_us, perp, w)."""
+    from ..experiments import perps_common as pc, xs_daily as xs
+    from ..paper import funding_carry as fcb, m4_hl_small, m4_ls as m4, m4_perps
+    cfg = {"m4_perps": m4_perps.CONFIG, "m4_hl_small": m4_hl_small.CONFIG}.get(name)
+
+    def fn(p: pl.DataFrame) -> pl.DataFrame:
+        E = xs.ranked(p.drop("known_us").with_columns(adv28_raw=pl.col("adv28"), fund7_raw=pl.col("fund7")))
+        live = set(E["perp"].drop_nulls().to_list())
+        listing = {pc.coin_of(s): s for s in live}
+        rows, w = [], {}
+        for d in np.unique(E["day"].to_numpy()):
+            if cfg is None:
+                tgt = fcb.new_tranche(fcb.candidates(E, int(d), live, listing))
+            else:
+                c = m4.candidates(E, booster, int(d), live, cfg=cfg)
+                c = (c.with_columns(coin=pl.Series([pc.coin_of(s) for s in c["perp"].to_list()], dtype=pl.Utf8))
+                     .sort("perp_adv28", descending=True).unique("coin", keep="first", maintain_order=True)
+                     .sort("score", descending=True))
+                tgt = w = m4.buffer_target(c, w, cfg=cfg)
+            rows += [{"known_us": int(d) + DAY, "perp": s, "w": float(x)} for s, x in tgt.items()]
+        return pl.DataFrame(rows, schema={"known_us": pl.Int64, "perp": pl.Utf8, "w": pl.Float64})
+    return fn
+
+
+def model_note(meta: dict) -> tuple[bool, str]:
+    """An M4 book's cached model is held as the book holds it: fine when its labels end before its decision day."""
+    from datetime import datetime, timezone
+    day = datetime.fromtimestamp(int(meta["decision_day"]) / 1e6, timezone.utc).strftime("%Y-%m-%d")
+    last = str(meta.get("last_label_day") or "")
+    return bool(last) and last < day, f"model trained on labels through {last or '?'}, decided {day}"
+
+
+def xs_book(name: str, p: pl.DataFrame, booster=None, meta: dict | None = None, n_cuts: int = 3) -> dict:
+    res = _tag(check(xs_choice(name, booster), p, n_cuts=n_cuts, name=name), "book", name)
+    if meta is not None:
+        ok, note = model_note(meta)
+        res["model"] = note
+        if not ok and res["ok"]:
+            res.update(ok=False, error=f"{note}: its labels reach its decision day")
+    return res

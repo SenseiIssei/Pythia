@@ -390,7 +390,7 @@ def eq1_book(data: Path, results: Path, book: str = "dual_mom", **kw) -> None:
         "rows": [{"book": book, "variant": "plus50", "broker": br, "dsr_all": kw.get("dsr", 0.97),
                   "dsr_small": 0.98, "val": {**val, "cagr": val["cagr"] - (br != "tr")}} for br in ("tr", "ibkr")]}))
     if kw.get("leak", True):
-        write(data, "reports/leak/latest.json", {"results": [{"kind": "book", "name": f"eq1_{book}_plus50", "ok": True}]})
+        write(data, "reports/leak/latest.json", {"results": [{"kind": "book", "name": f"etf_books {book}", "ok": True}]})
 
 
 EQ1_COMMITS = {**COMMITS, "etf_books_eq1_prereg.md": (ts("2026-10-29"), "e1"), "etf_books_eq1.md": (ts("2026-10-29") + 60, "e2")}
@@ -671,3 +671,24 @@ def test_the_total_without_f3_is_r5_alone(env):
     reg = ladder.register_total(data)
     assert reg["f3_trials"] == 0 and reg["n_trials"] == reg["r5_trials"] == metrics.trial_pool(
         extra=ladder.pf_trials())["n_trials"]
+
+
+def test_t1b_the_books_t1_now_checks_and_the_ones_it_does_not_apply_to():
+    """results/leak_coverage_prereg.md: EQ1's books read their rule's check, pump.fun and onchain_meme books a
+    decision with the check that applies instead, never "not checked"."""
+    rep = [{"kind": "book", "name": "etf_books dual_mom", "ok": True},
+           {"kind": "book", "name": "m4_perps", "ok": False, "why": "leak: x"}]
+    ctx = {"leak_report": rep, "pf": {"rules": {}}}
+    eq1 = {"kind": "book", "name": "eq1_dual_mom_plus50", "family": "small", "leak_name": "etf_books dual_mom"}
+    assert ladder.leak_cond(eq1, ctx)["ok"]
+    m4 = {"kind": "book", "name": "m4_perps", "family": "hand", "leak_name": ladder.LEAK_NAMES["m4_perps"]}
+    assert not ladder.leak_cond(m4, ctx)["ok"] and ladder.leak_cond(m4, ctx)["value"] == "leak: x"
+    for n, fam in (("P_pool0_10eur", "pumpfun"), ("P_pool5_top30t_sw10o1n", "pumpfun"),
+                   ("onchain_meme_trend_top", "hand")):
+        c = ladder.leak_cond({"kind": "book", "name": n, "family": fam, "leak_name": None}, ctx)
+        assert c["ok"] and c["value"].startswith("not applicable: ") and "not checked" not in c["value"]
+    c = ladder.leak_cond({"kind": "book", "name": "P_pool0_10eur", "family": "pumpfun"}, {**ctx, "pf": None})
+    assert not c["ok"] and c["value"].endswith("no paper ledger read") and c["path"] == ladder.PF_LEDGER
+    small = {"kind": "book", "name": "small40_vol_target", "family": "small",
+             "leak_name": "smallaccount small40_vol_target"}
+    assert "not in T1's book list" in ladder.leak_cond(small, ctx)["value"]

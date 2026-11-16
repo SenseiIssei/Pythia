@@ -267,6 +267,95 @@ def test_the_panel_builder_is_checked_on_its_long_frame(panel):
     assert res["kind"] == "book" and res["runs"] > 0 and res["error"] is None
 
 
+# ---------------------------------------------------------------- the ladder's other books (T1b)
+
+@pytest.mark.parametrize("book", ["hold_sp500", "dual_mom", "trend_sp500", "voltarget_sp500"])
+def test_eq1_rules_pass_on_their_closes(book):
+    from lab.experiments import etf_books_eq1 as eq1
+    from test_etf_books_eq1 import series
+    res = checks.eq1_book(book, eq1.build(series(a="2021-01-04", z="2023-12-29"), to=None), n_cuts=2)
+    assert res["ok"] and res["kind"] == "book" and res["name"] == f"etf_books {book}", leak.reason(res)
+
+
+def test_an_eq1_rule_on_tomorrows_close_is_caught(monkeypatch):
+    from lab.experiments import etf_books_eq1 as eq1
+    from test_etf_books_eq1 import series
+    C = eq1.build(series(a="2021-01-04", z="2023-12-29"), to=None)
+    real = eq1.targets
+    monkeypatch.setattr(eq1, "targets", lambda b, C, t: {eq1.SP500: 1.0} if t + 1 < C.T and
+                        C.close[t + 1, C.col(eq1.SP500)] > C.close[t, C.col(eq1.SP500)] else real(b, C, t))
+    res = checks.eq1_book("hold_world", C, n_cuts=2)
+    assert not res["ok"] and res["first"]["column"] in C.names
+
+
+@pytest.mark.parametrize("key", ["spy_trend", "vol_target"])
+def test_s2_rules_pass_on_their_market(key):
+    from lab.experiments import smallaccount_s2 as s2
+    from test_smallaccount_s2 import make_etf, make_panel
+    m = s2.market(make_panel(), {"SPY": make_etf(), "GLD": make_etf(seed=4)}, 1.0, {})
+    res = checks.s2_book(key, m, n_cuts=2)
+    assert res["ok"] and res["name"] == f"smallaccount small40_{key}", leak.reason(res)
+
+
+def xs_rows(days: int = 90, n: int = 30, seed: int = 0) -> pl.DataFrame:
+    """The xs_daily panel's columns the books read, noise on n perps."""
+    from lab.experiments import xs_daily as xs
+    rng = np.random.default_rng(seed)
+    day0 = 1_700_006_400_000_000 // checks.DAY * checks.DAY
+    rows = {"day": np.repeat(day0 + np.arange(days, dtype=np.int64) * checks.DAY, n),
+            "symbol": np.tile([f"C{j}USDT" for j in range(n)], days), "eligible": np.ones(days * n, dtype=bool)}
+    rows["perp"] = rows["symbol"]
+    for c in list(dict.fromkeys(xs.FEATURES + ["fwd1", "fwd3", "perp_adv28"])):
+        rows[c] = rng.normal(size=days * n)
+    return pl.DataFrame(rows).with_columns(known_us=pl.col("day") + checks.DAY)
+
+
+class FirstFeature:
+    """A model stand-in: the score is the first feature (r1's rank)."""
+    def predict(self, X):
+        return X[:, 0]
+
+
+META = {"decision_day": 1_794_268_800_000_000, "last_label_day": "2026-11-02"}
+
+
+@pytest.mark.parametrize("name", ["funding_carry", "m4_perps", "m4_hl_small"])
+def test_the_xs_books_pass_from_their_ranked_panel(name):
+    res = checks.xs_book(name, xs_rows(), None if name == "funding_carry" else FirstFeature(),
+                         None if name == "funding_carry" else META, n_cuts=2)
+    assert res["ok"] and res["runs"] > 0 and res["name"] == name, leak.reason(res)
+    assert name == "funding_carry" or res["model"] == "model trained on labels through 2026-11-02, decided 2026-11-10"
+
+
+def test_an_xs_feature_from_tomorrow_is_caught(monkeypatch):
+    from lab.experiments import xs_daily as xs
+    real = xs.ranked
+    monkeypatch.setattr(xs, "ranked", lambda p: real(p.sort("symbol", "day").with_columns(
+        r1=pl.col("r1").shift(-1).over("symbol"))))
+    res = checks.xs_book("m4_perps", xs_rows(), FirstFeature(), META, n_cuts=2)
+    assert not res["ok"] and res["first"]["column"] in ("w", "(rows)")
+
+
+def test_an_m4_model_trained_past_its_decision_day_is_red():
+    res = checks.xs_book("m4_perps", xs_rows(days=40), FirstFeature(), {**META, "last_label_day": "2026-11-10"},
+                         n_cuts=1)
+    assert not res["ok"] and "labels through 2026-11-10" in leak.reason(res)
+
+
+def test_the_other_books_each_say_their_missing_data_and_never_fetch(panel, tmp_path, monkeypatch):
+    from lab.experiments import etf_trend as et
+    from lab.paper import m4_ls as m4
+    monkeypatch.setattr(et, "CACHE", tmp_path / "etf")
+    monkeypatch.setattr(et, "download", lambda *a, **k: pytest.fail("fetched"))
+    monkeypatch.setattr(m4, "CACHE", tmp_path / "cache")
+    out = job.other_books(panel)
+    assert [r["name"] for r in out] == ["etf_books hold_sp500", "etf_books hold_world", "etf_books dual_mom",
+                                        "etf_books trend_sp500", "etf_books voltarget_sp500",
+                                        "smallaccount small40_spy_trend", "smallaccount small40_vol_target",
+                                        "funding_carry", "m4_perps", "m4_hl_small"]
+    assert all(r["kind"] == "book" and not r["ok"] and r["error"] for r in out)
+
+
 # ---------------------------------------------------------------- the weekly job and the health lines
 
 def test_the_weekly_report_names_every_red_line(tmp_path, monkeypatch):
@@ -303,6 +392,11 @@ def test_health_has_a_red_line_per_leaking_feature_builder_or_book(tmp_path):
     assert lines == [("leak feature f 1d", False, "leak: f 1d at 2026-01-01 moves"), ("leak zoo M8", False, "OSError: x")]
     names = [n for n, _, _ in jobs.health_checks(t)]
     assert "leak feature f 1d" in names and "leak spec abc" not in names
+    # T1b: _health/jobs.json carries them too (the weekly page reads that file); the jobs keep their own state
+    s = jobs.write_status(t)
+    assert s["leaks"] == [{"name": "leak feature f 1d", "detail": "leak: f 1d at 2026-01-01 moves"},
+                          {"name": "leak zoo M8", "detail": "OSError: x"}]
+    assert json.loads(t.status_path.read_text())["leaks"] == s["leaks"] and s["failing"] == ["a"]   # never ran
 
 
 def test_the_job_is_in_the_table():

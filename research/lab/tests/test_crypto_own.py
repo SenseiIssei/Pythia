@@ -157,3 +157,31 @@ def test_lowkr_book_drops_the_coin_hot_in_korea_and_guards_ticker_clashes(tmp_pa
     assert flags[t, b] and W[t, b] == 0.0
     assert not flags[t, P.names.index("CCCUSDT")]
     assert tf.signal("tsmom_tranches_lowkr", P, W, t, 1)["evidence"]["report"] == "kr_premium_xs"
+
+
+def test_lowkr_guard_judges_a_new_upbit_coin_on_its_days_so_far_not_on_the_ones_after(tmp_path, monkeypatch):
+    """T1's red of 2026-11-15 (results/leak_coverage_prereg.md): the ticker clash guard judged a coin's whole column
+    on the median of its first 30 Upbit days, so on a day inside them it read days still to come."""
+    import polars as pl
+    from lab import leak
+    from lab.collect import flow
+    from lab.experiments import kr_premium_xs as kr
+    monkeypatch.setattr(flow, "FLOW", tmp_path)
+    P = _panel()
+    fx, first, calm = 1300.0, 300, 10            # GGG on Upbit from day 300: 10 days at 8 %, then 30 % over Binance
+    rows = []
+    for c in COINS:
+        j = P.names.index(f"{c}USDT")
+        for t in range(first if c == "GGG" else 0, P.T):
+            prem = (0.08 if t < first + calm else 0.3) if c == "GGG" else 0.01 * (j % 5)
+            rows.append({"market": f"KRW-{c}", "day_us": int(P.days[t]), "close": float(P.close[t, j]) * fx * (1 + prem),
+                         "open": 0.0, "high": 0.0, "low": 0.0, "value_krw": 1.0})
+    pl.DataFrame(rows).write_parquet(tmp_path / "upbit_krw_1d.parquet")
+    pl.DataFrame({"day_us": [int(P.days[0])], "usdkrw": [fx]}).write_parquet(tmp_path / "fx_usdkrw.parquet")
+    t = first + calm - 2
+    res = leak.check(kr.kr_flags, P, cuts=[t], columns=P.names, name="lowkr flags")
+    assert res["ok"], leak.reason(res)
+    g = P.names.index("GGGUSDT")
+    assert kr.kr_flags(P)[t, g], "its days so far pass the guard, and 8 % is the worst premium that day"
+    s = kr.signal(P)["s"]
+    assert np.isnan(s[first + 25:, g]).all(), "once most of its first days clash it is out"

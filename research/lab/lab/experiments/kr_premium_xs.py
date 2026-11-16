@@ -60,14 +60,23 @@ def signal(P: fc.Panel) -> dict:
             U[r[alive], j] = v[alive]
     with np.errstate(invalid="ignore", divide="ignore"):
         p = np.log(U / (P.close * fxv[:, None]))
+    # The ticker clash guard, point in time: each day judged on the median |premium| of the coin's first
+    # GUARD_DAYS Upbit days known by then (fewer until it has them), never on days after it. Judging the whole
+    # column on its first 30 days read up to 29 days ahead (T1's leak check, results/leak_coverage_prereg.md).
     dropped = []
     for j in range(P.N):
         f = np.flatnonzero(np.isfinite(p[:, j]))
         if len(f) == 0:
             continue
-        if np.median(np.abs(p[f[:GUARD_DAYS], j])) > GUARD_MAX:
+        a = np.abs(p[f[:GUARD_DAYS], j])
+        med = np.array([np.median(a[: k + 1]) for k in range(len(a))])
+        bad = np.zeros(P.T, dtype=bool)
+        bad[f[: len(a)]] = med > GUARD_MAX
+        if len(f) > len(a):
+            bad[f[len(a)]:] = med[-1] > GUARD_MAX
+        if bad.any():
             dropped.append(P.names[j])
-            p[:, j] = np.nan
+            p[bad, j] = np.nan
     p = np.where(np.abs(p) > CUT, np.nan, p)
     x = p - p[:, [P.btc]]
     s = fc.rolling(x, 7, 5)

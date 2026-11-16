@@ -115,6 +115,10 @@ FROZEN: dict[str, tuple[str, str]] = {
     "breakout_top10": ("2026-10-20", "the forward audit found 3 of 15 coin-days off its backtest: the book "
                                      "started from its coins' entry weights instead of the drifted weights "
                                      "the backtest held, fixed in lab.paper.families"),
+    # T1b (results/leak_coverage_prereg.md): not the audit's kill rule, the same freeze.
+    "tsmom_tranches_lowkr": ("2026-11-16", "T1's leak check found its Korean premium filter judging a coin new on "
+                                           "Upbit on its first 30 Upbit days, days still to come, fixed in "
+                                           "lab.experiments.kr_premium_xs"),
 }
 # picks_ls journals book the modelled cost (10 bps per unit of turnover) as their fill cost.
 MODELLED_ONLY = {"picks_ls": 0.0010, "picks_ls_v2": 0.0010}

@@ -1165,8 +1165,11 @@ def build_status(t: Table, now: datetime | None = None) -> dict:
     jobs = [job_status(t, j, now, _parse_iso(live.get(j["name"])) or installed)
             for j in sorted(t.jobs.values(), key=lambda j: j["name"])]
     failing = [j["name"] for j in jobs if not j["ok"]]
+    # T1b (results/leak_coverage_prereg.md): the leak check's red lines here too, so the pages that read only this
+    # file (the weekly page) see them; a job's own state stays its own.
+    leaks = [{"name": n, "detail": d} for n, _, d in leak_lines(t)]
     return {"at": _iso(now), "ok": not failing, "failing": failing, "table": t.path, "jobs": jobs,
-            "disk": _read_json(t.ops_dir / "disk" / "latest.json")}
+            "leaks": leaks, "disk": _read_json(t.ops_dir / "disk" / "latest.json")}
 
 
 def write_status(t: Table, now: datetime | None = None) -> dict:

@@ -738,7 +738,8 @@ missing in the last 7 days, a column is missing or a part of the run failed
 installed less than one schedule period plus an hour ago). Each feature, zoo
 feature builder or paper book the weekly leak check found leaking (or could not
 check) gets a red row `leak <kind> <name>` with the first moved time and column,
-from `reports/leak/latest.json` (no row before its first report). The Lab
+from `reports/leak/latest.json` (no row before its first report); since T1b the
+same lines go into `_health/jobs.json` (`leaks`) and onto the weekly page. The Lab
 page shows it ("Is everything running?"); the PC gets it with the sync. Red
 for two runs in a row posts to Telegram (below, "Health alarm"), and again
 whenever another check is red for two runs while the first is still red.
