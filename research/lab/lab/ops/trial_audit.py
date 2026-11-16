@@ -111,6 +111,8 @@ DECLARED: list[tuple[str, str, int, str, str, str]] = [
      'nothing and makes no number and no trial.', ''),
     ('ladder_pumpfun', 'pumpfun', 5, 'ladder_pumpfun.md',
      'Five trials, counted only (`pumpfun:ladder:<rule>`, family `pumpfun`), in every DSR', ''),
+    ('leak_coverage', 'hand', 0, 'leak_coverage_prereg.md',
+     'None. The leak check answers yes or no per function and makes no performance number', ''),
     ('leak_harness', 'hand', 0, 'leak_harness_prereg.md',
      'on no window of returns. It registers no trial in `<data>/trials/registry.jsonl`', ''),
     ('m4_residual', 'hand', 1, 'm4_residual_prereg.md',
