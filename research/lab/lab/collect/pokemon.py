@@ -57,6 +57,20 @@ unfinished (RESUME_DAYS) first finishes it under its own date from the pages
 cached then, then takes today's. A query that changed (fields, page size)
 starts over. Prices of that snapshot are read a day apart at most.
 
+API down: from 2026-11-20 the API answered 500 and 502 on single card pages
+for longer than a page's retries, three attempts in a row, two days running
+(the 11-21 run ended 5 s before the 2 h timeout), so the collector exited 1,
+lab.pokemon.daily never ran and tcgcsv.com, the one source with fresh prices
+then, was never asked. The card attempts now stop at a time budget (--budget,
+BUDGET_S, counted from the start of the run, pending snapshot included) and
+when today's cards fail every attempt, the sealed product and the new
+singles of today are taken from tcgcsv.com alone (`collect_sealed`, meta
+"cards_failed", no card snapshot that day, the cursor is kept for the next
+run). The collector says so in one line and exits 0, and the studies run
+on the last card snapshot; red stays with `stale_sources` and lab.pokemon.daily
+(the API's prices count by the newest snapshot that has cards), and the
+collector still exits 1 when tcgcsv.com fails too.
+
 Freshness: TCGplayer prices are refreshed daily. The API stopped refreshing
 Cardmarket for most cards in mid 2026; a Cardmarket block older than 14 days
 (CM_FRESH_DAYS) is kept in the lake for the record but counts for nothing
@@ -111,6 +125,9 @@ CACHE_DAYS = 3
 STALE_DAYS = 3
 # An unfinished snapshot at most this many days old is finished before today's.
 RESUME_DAYS = 1
+# Seconds from the start of a run after which no card page is asked for: the
+# job's timeout is 2 h, the rest is for the sealed fallback and lab.pokemon.daily.
+BUDGET_S = 6000.0
 CURSOR = "_cursor.json"
 USER_AGENT = "pythia-lab-collector (data only)"
 CARD_FIELDS = ("id,name,supertype,subtypes,types,hp,attacks,abilities,number,rarity,artist,"
@@ -175,6 +192,8 @@ class Client:
     timeout: float = 60.0
     cache_dir: Path | None = None
     headers: dict = field(default_factory=dict)
+    # On `clock`: from then on a page not in the cache fails at once (the run's time budget).
+    deadline: float | None = None
     requests: int = 0
     cache_hits: int = 0
     _last: float = -1e9
@@ -194,6 +213,9 @@ class Client:
         hdrs = {"User-Agent": USER_AGENT, "Accept": "application/json", **self.headers}
         last_err = "no attempt"
         for attempt in range(self.retries):
+            if self.deadline is not None and self.clock() >= self.deadline:
+                last_err = "time budget spent"
+                break
             self._wait()
             self.requests += 1
             try:
@@ -564,7 +586,7 @@ def stale_sources(root: Path, today: str, days: int = STALE_DAYS,
     """(red, line): the line names every source whose newest price is more than
     `days` old and since when (None if none is); red only when no source has
     a price that recent. The API's TCGplayer and Cardmarket count by the newest
-    price on the latest snapshot, TCGplayer's dumps by the last snapshot with
+    price on the latest snapshot with cards, TCGplayer's dumps by the last snapshot with
     sealed or new singles in it. `current` is a meta not written yet. In
     October 2026 the API's TCGplayer prices stood at 2026-10-15 and its
     Cardmarket prices at 2026-07-01 while every run passed."""
@@ -576,7 +598,8 @@ def stale_sources(root: Path, today: str, days: int = STALE_DAYS,
             continue
     if current:
         metas[current["date"]] = current
-    fr = (metas[max(metas)].get("freshness") or {}) if metas else {}
+    # The newest snapshot with cards: a day the API failed (collect_sealed) has no card freshness.
+    fr = next((m["freshness"] for _, m in sorted(metas.items(), reverse=True) if m.get("freshness")), {})
     dumps = max((d for d, m in metas.items() if (m.get("sealed") or 0) + (m.get("singles_new") or 0) > 0), default=None)
     src = [("TCGplayer (pokemontcg.io)", fr.get("tcgplayer_newest")),
            ("Cardmarket (pokemontcg.io)", fr.get("cardmarket_newest")),
@@ -623,12 +646,14 @@ def client_for(cache_dir: Path | None) -> Client:
 
 
 def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = False, max_pages: int | None = None,
-            dry_run: bool = False, client: Client | None = None, log=print) -> dict:
+            dry_run: bool = False, client: Client | None = None, log=print, deadline: float | None = None) -> dict:
     t0 = time.time()
     snap = snap or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     root = lake()
     if client is None:
         client = client_for(None if dry_run else root / "_cache" / snap)
+    if deadline is not None:
+        client.deadline = deadline
     # The cursor only for a real full snapshot: a dry run or a --max-pages test neither reads nor moves it.
     cursor = Cursor.load(None if dry_run or max_pages is not None else root / CURSOR, snap)
     resumed = {k: v.get("page") for k, v in cursor.pages.items()}
@@ -660,6 +685,7 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
         r = card_row(c, snap)
         catalog.append({k: r[k] for k in CATALOG_COLS})
         all_rows.append(r)
+    client.deadline = None  # the budget is for the card pages; the rest of a finished snapshot is taken
     if sets is None:
         sets = [set_row(s, snap) for s in sorted(card_sets.values(), key=lambda s: str(s.get("releaseDate") or ""))]
     if fx_source != "ECB":
@@ -719,6 +745,43 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
     return meta
 
 
+def collect_sealed(snap: str, cards_error: str, client: Client | None = None, log=print) -> dict:
+    """Today's cards failed every attempt (the API down): the sealed product and
+    the new singles of the day from tcgcsv.com alone, with a meta that names the
+    failure ("cards_failed") and carries no card freshness. No card snapshot is
+    written and the cursor stays, so the next run finishes the cards under this
+    date (and rewrites this meta). FetchError when tcgcsv.com fails too or
+    prices nothing."""
+    t0 = time.time()
+    root = lake()
+    client = client or client_for(root / "_cache" / snap)
+    eurusd = fetch_eurusd(client)
+    singles: list[dict] = []
+    sealed_rows = fetch_sealed(client, snap, log=log, singles=singles)
+    if not sealed_rows and not singles:
+        raise FetchError("tcgcsv.com: no sealed product and no single priced; nothing written")
+    meta = {
+        "date": snap, "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "cards_seen": 0, "cards_kept": 0, "min_usd": None, "sets": None, "sets_source": None, "freshness": None,
+        "sealed": len(sealed_rows), "singles_new": len(singles),
+        "eurusd": eurusd, "fx_source": "ECB" if eurusd else "none",
+        "requests": client.requests, "cache_hits": client.cache_hits, "seconds": round(time.time() - t0, 1),
+        "errors": [f"cards: {cards_error}; no card snapshot, sealed and singles only"],
+        "complete": False, "resumed": None, "cards_failed": cards_error,
+    }
+    meta["stale"] = stale_sources(root, snap, current=meta)[1]
+    if sealed_rows:
+        write_parquet(sealed_rows, root / "sealed" / f"date={snap}" / "sealed.parquet")
+    if singles:
+        write_parquet(singles, root / "singles" / f"date={snap}" / "singles.parquet")
+    (root / "meta").mkdir(parents=True, exist_ok=True)
+    (root / "meta" / f"{snap}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    log(json.dumps(meta))
+    if meta.get("stale"):
+        log(meta["stale"])
+    return meta
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--date", help="snapshot date (default today, UTC)")
@@ -729,11 +792,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--attempts", type=int, default=3,
                     help="whole-run attempts; the day cache makes each retry continue where the last stopped")
     ap.add_argument("--pause", type=float, default=300.0, help="seconds between whole-run attempts")
+    ap.add_argument("--budget", type=float, default=BUDGET_S,
+                    help="seconds from the start after which no card page is asked for")
     a = ap.parse_args(argv)
+    deadline = time.monotonic() + a.budget
 
-    def run(snap: str | None) -> int:
-        return run_with_attempts(lambda: collect(snap, a.min_usd, a.sealed, a.max_pages, a.dry_run),
-                                 a.attempts, a.pause)
+    def run(snap: str | None, errors: list[str] | None = None) -> int:
+        return run_with_attempts(lambda: collect(snap, a.min_usd, a.sealed, a.max_pages, a.dry_run, deadline=deadline),
+                                 a.attempts, a.pause, deadline=deadline, errors=errors)
 
     if a.date is None and not a.dry_run and a.max_pages is None:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -743,20 +809,41 @@ def main(argv: list[str] | None = None) -> int:
             # pages first. If it fails again, today's snapshot still runs and takes the cursor.
             print(f"pokemon collector: finishing the unfinished {prev} snapshot first")
             run(prev)
-    return run(a.date)
+    errors: list[str] = []
+    rc = run(a.date, errors)
+    if rc and a.sealed and a.date is None and not a.dry_run and a.max_pages is None and errors:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        print(f"pokemon collector: no card snapshot on {today}, the card pages of the Pokemon TCG API "
+              f"(pokemontcg.io) failed {len(errors)} attempt{'s' if len(errors) != 1 else ''} (last: {errors[-1]}), "
+              "an HTTP 5xx there is a fault at the source; taking the sealed product and new singles from "
+              "tcgcsv.com alone, the studies run on the last card snapshot")
+        try:
+            collect_sealed(today, errors[-1])
+        except FetchError as e:
+            print(f"pokemon collector: tcgcsv.com failed too: {e}", file=sys.stderr)
+            return 1
+        return 0
+    return rc
 
 
 def run_with_attempts(fn: Callable[[], dict], attempts: int, pause: float,
-                      sleep: Callable[[float], None] = time.sleep) -> int:
+                      sleep: Callable[[float], None] = time.sleep, deadline: float | None = None,
+                      clock: Callable[[], float] = time.monotonic, errors: list[str] | None = None) -> int:
     """The API has had bad hours (5xx on single pages for minutes). A page that
     fails all its retries ends the attempt; the next attempt reads every page
-    already fetched from the day cache and asks only for the rest."""
+    already fetched from the day cache and asks only for the rest. No attempt
+    is started once the pause would reach `deadline`; each failure goes to `errors`."""
     for i in range(1, max(attempts, 1) + 1):
         try:
             fn()
             return 0
         except FetchError as e:
             print(f"pokemon collector attempt {i} of {attempts} failed: {e}", file=sys.stderr)
+            if errors is not None:
+                errors.append(str(e))
+            if i < attempts and deadline is not None and clock() + pause >= deadline:
+                print(f"pokemon collector: time budget spent after attempt {i}, no further attempt", file=sys.stderr)
+                return 1
             if i < attempts:
                 sleep(pause)
     return 1

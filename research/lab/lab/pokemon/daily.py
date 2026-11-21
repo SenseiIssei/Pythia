@@ -242,6 +242,9 @@ def markdown(meta: dict, studies: dict, fv: dict, mstat: dict, coll: dict, al: d
            "Every return-based number below needs this history; the API itself keeps no history beyond "
            "Cardmarket's avg1 / avg7 / avg30.",
            f"- Sealed product: {meta.get('sealed') if meta.get('sealed') is not None else 'not collected'}.",
+           *([f"- No card snapshot on {meta['cards_failed']['date']}: the Pokemon TCG API failed "
+              f"({meta['cards_failed']['error']}); sealed product and new singles of that day are in, the card "
+              f"prices are those of {meta['snapshot']}."] if meta.get("cards_failed") else []),
            _freshness_line(meta), "",
            "## Model status", "", mstat["sentence"], ""]
     hz = []
@@ -356,6 +359,22 @@ def monthly(d: Path, reports: Path, month: str, md_daily: str) -> None:
     (out / f"{prev}.md").write_text(text, encoding="utf-8")
 
 
+def cards_failed(root: Path, snapshot: str) -> dict | None:
+    """The newest collector day after the card snapshot whose cards failed
+    (lab.collect.pokemon.collect_sealed: the API down), so the report says why
+    the card prices are older than the sealed ones; None if there is none."""
+    for f in sorted((root / "meta").glob("*.json"), reverse=True):
+        if f.stem <= snapshot:
+            return None
+        try:
+            m = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if m.get("cards_failed"):
+            return {"date": f.stem, "error": m["cards_failed"]}
+    return None
+
+
 def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) -> dict:
     t0 = time.time()
     root = lake()
@@ -379,7 +398,8 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
             "sets": snap["set_id"].n_unique(), "eurusd": cmeta.get("eurusd"), "fx_source": cmeta.get("fx_source"),
             "sealed": cmeta.get("sealed"), "freshness": cmeta.get("freshness") or {},
             "sets_source": cmeta.get("sets_source"), "collector_errors": cmeta.get("errors") or [],
-            "stale": stale_sources(root, datetime.now(timezone.utc).strftime("%Y-%m-%d"))[1]}
+            "stale": stale_sources(root, datetime.now(timezone.utc).strftime("%Y-%m-%d"))[1],
+            "cards_failed": cards_failed(root, today)}
     pdir = root / "paper"
     month_before = collection.load_state(pdir).get("last_rebalance")
     if not dry_run:

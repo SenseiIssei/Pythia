@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import sys
 import urllib.parse
 from datetime import date
@@ -212,6 +213,94 @@ def test_main_finishes_yesterdays_snapshot_before_todays(lake, monkeypatch):
     calls.clear()
     assert col.main(["--date", "2026-03-02"]) == 0 and calls == ["2026-03-02"], "an explicit date is taken as asked"
 
+
+def _api_down(m, fail_from: int, tcgcsv_up: bool = True):
+    """The 2026-11-21 log: the API's card pages answer 500 on every try from
+    page `fail_from` on, tcgcsv.com answers (one group, a booster box and a single)."""
+    inner = m.opener()
+    groups = {"results": [{"groupId": 7, "name": "ME05: Pitch Black", "publishedOn": "2026-02-20T00:00:00"}]}
+    prods = {"results": [{"productId": 70, "name": "Pitch Black Booster Box", "extendedData": []},
+                         {"productId": 71, "name": "Chase", "extendedData": [{"name": "Number", "value": "200/190"}]}]}
+    prices = {"results": [{"productId": 70, "marketPrice": 150.0}, {"productId": 71, "marketPrice": 40.0}]}
+
+    def opener(url, h, t):
+        if url.startswith(col.TCGCSV):
+            if not tcgcsv_up:
+                return 502, {}, b""
+            body = groups if url.endswith("/groups") else prods if url.endswith("/products") else prices
+            return 200, {}, json.dumps(body).encode()
+        if "/cards" in url and int(urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["page"][0]) >= fail_from:
+            return 500, {}, b""
+        return inner(url, h, t)
+    return opener
+
+
+def test_an_api_down_day_takes_the_dumps_alone_and_the_studies_still_run(lake, monkeypatch, capsys):
+    m = Market(date(2026, 3, 1), n_sets=2, per_set=300)  # 600 cards: three pages
+    col.collect("2026-03-01", min_usd=0.0, sealed=True, log=lambda *a: None,
+                client=col.Client(opener=_api_down(m, 99), sleep=lambda s: None, spacing=0.0))
+    opener = {"o": _api_down(m, 2)}
+    monkeypatch.setattr(col, "client_for", lambda cache: col.Client(opener=opener["o"], sleep=lambda s: None,
+                                                                    spacing=0.0, retries=2, cache_dir=cache))
+
+    class Now(col.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return col.datetime(2026, 3, 2, 7, 5, tzinfo=col.timezone.utc)
+
+    monkeypatch.setattr(col, "datetime", Now)
+    monkeypatch.setattr(daily, "datetime", Now)
+    capsys.readouterr()
+    # Before: exit 1 after three attempts, nothing of the day written and daily (&&) never ran.
+    assert col.main(["--sealed", "--pause", "0"]) == 0
+    out = capsys.readouterr()
+    assert out.err.count("failed: https://api.pokemontcg.io/v2/cards: HTTP 500") == 3
+    assert "no card snapshot on 2026-03-02" in out.out and "a fault at the source" in out.out
+    meta = json.loads((lake / "meta" / "2026-03-02.json").read_text())
+    assert meta["cards_failed"].endswith("HTTP 500") and meta["complete"] is False and meta["freshness"] is None
+    assert meta["sealed"] == 1 and meta["singles_new"] == 1
+    assert pl.read_parquet(lake / "sealed" / "date=2026-03-02" / "sealed.parquet")["market"].to_list() == [150.0]
+    assert not (lake / "cards" / "date=2026-03-02").exists(), "no half card snapshot"
+    assert json.loads((lake / col.CURSOR).read_text())["date"] == "2026-03-02", "the cursor stays for the next run"
+    # The API's prices count by the last snapshot with cards (03-01), the dumps by today's: green.
+    assert col.stale_sources(lake, "2026-03-02") == (False, None)
+    assert daily.main(["--no-alerts", "--no-eval"]) == 0
+    md = (lake.parent / "reports" / "pokemon" / "latest.md").read_text()
+    assert "- No card snapshot on 2026-03-02: the Pokemon TCG API failed" in md
+    assert "card prices are those of 2026-03-01" in md and "\u2014" not in md
+    # Not hidden: four days on the API's card prices are named stale; tcgcsv.com down too is red.
+    assert "TCGplayer (pokemontcg.io) since 2026-03-01" in col.stale_sources(lake, "2026-03-05")[1]
+    for f in (lake / "meta").glob("2026-03-02.json"):
+        f.unlink()
+    opener["o"] = _api_down(m, 2, tcgcsv_up=False)
+    shutil.rmtree(lake / "_cache" / "2026-03-02")
+    assert col.main(["--sealed", "--pause", "0"]) == 1
+    assert "tcgcsv.com failed too" in capsys.readouterr().err
+
+
+def test_the_time_budget_stops_card_pages_and_attempts(tmp_path):
+    m = Market(date(2026, 1, 1), n_sets=1, per_set=3)
+    t = {"now": 0.0}
+    c = col.Client(opener=m.opener(), sleep=lambda s: None, spacing=0.0, cache_dir=tmp_path, clock=lambda: t["now"],
+                   deadline=10.0)
+    a = c.get(f"{col.API}/sets?page=1", cache_key="sets_1")
+    t["now"] = 10.0
+    assert c.get("ignored", cache_key="sets_1") == a, "a cached page is still read"
+    with pytest.raises(col.FetchError, match="time budget spent"):
+        c.get(f"{col.API}/sets?page=2", cache_key="sets_2")
+    assert c.requests == 1
+    tries, pauses, errors = [], [], []
+
+    def fail():
+        tries.append(1)
+        t["now"] += 100.0
+        raise col.FetchError("x: HTTP 500")
+
+    t["now"] = 0.0
+    assert col.run_with_attempts(fail, 3, 300.0, sleep=lambda s: pauses.append(s) or t.update(now=t["now"] + s),
+                                 deadline=450.0, clock=lambda: t["now"], errors=errors) == 1
+    assert len(tries) == 2 and pauses == [300.0], "the pause after the second attempt would cross the deadline"
+    assert errors == ["x: HTTP 500", "x: HTTP 500"]
 
 def test_one_stale_source_is_named_and_all_stale_is_red_after_the_studies(lake, monkeypatch, capsys):
     m = Market(date(2026, 3, 1), n_sets=3, per_set=20)
