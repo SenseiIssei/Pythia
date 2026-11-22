@@ -55,8 +55,10 @@ main() {
   if [ "$n" -eq 0 ]; then
     echo "$(date -u +%FT%TZ) up to date" >> "$log"
   else
-    # tar over ssh keeps it to one connection; -T reads the file list from stdin
-    ssh -o BatchMode=yes "$host" "cd $remote && tar -cf - -T -" < "$want" | tar --force-local -xf - -C "$local_root"
+    # tar over ssh keeps it to one connection; -T reads the file list from stdin.
+    # --ignore-failed-read: a file the VPS removed after the listing (_ops/running/*.json come and go)
+    # is a warning, not exit 2, which under pipefail ended the run before the backup and the receipt.
+    ssh -o BatchMode=yes "$host" "cd $remote && tar --ignore-failed-read -cf - -T -" < "$want" | tar --force-local -xf - -C "$local_root"
 
     # Day partitions on the VPS are first parts, then one day.parquet. Remove local
     # parts that the VPS has already folded away, or readers would count rows twice.

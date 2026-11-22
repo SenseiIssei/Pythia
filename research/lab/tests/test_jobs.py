@@ -1017,6 +1017,34 @@ def test_sync_to_pc_copies_the_newest_archive_by_checksum(tmp_path):
     assert "different checksum" in (pc / "sync.log").read_text()
 
 
+@pytest.mark.skipif(not shutil.which("sha256sum"), reason="sha256sum not installed")
+def test_sync_to_pc_survives_a_file_removed_after_the_listing(tmp_path):
+    # 2026-11-22: _ops/running/free-perps-all.json was gone by the time tar ran, tar exited 2 and
+    # pipefail ended the run before the backup copy, so the receipt stayed on 11-06
+    t = _backup_table(tmp_path)
+    a = jobs.backup(t, now=datetime(2026, 11, 22, 2, 20, tzinfo=UTC))
+    data = tmp_path / "data"
+    gone = data / "_ops" / "running" / "free-perps-all.json"
+    gone.parent.mkdir(parents=True, exist_ok=True)
+    gone.write_text("{}")
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    # ssh that runs the remote command here, and removes the file just before the tar
+    (bin_ / "ssh").write_text('#!/usr/bin/env bash\nwhile [ "$1" = -o ]; do shift 2; done\nshift\n'
+                              f'case "$*" in *"tar "*) rm -f "{gone}";; esac\nexec bash -c "$*"\n')
+    (bin_ / "ssh").chmod(0o755)
+    pc = tmp_path / "pc"
+    env = dict(os.environ, PATH=f"{bin_}:{os.environ.get('PATH', '')}", PYTHIA_VPS="vps",
+               PYTHIA_VPS_DATA=str(data), PYTHIA_VPS_BACKUP=str(tmp_path / "backup"),
+               PYTHIA_LOCAL=str(pc))
+    r = subprocess.run(["bash", str(REPO_TABLE.parents[1] / "sync-to-pc.sh")], env=env,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert (pc / "engine" / "state.json").exists() and not (pc / "_ops" / "running" / "free-perps-all.json").exists()
+    rec = json.loads((tmp_path / "backup" / "offsite.json").read_text())
+    assert rec["archive"] == Path(a["archive"]).name
+
+
 # ---------------------------------------------------------------- command line
 
 def test_cli(tmp_path, capsys):
