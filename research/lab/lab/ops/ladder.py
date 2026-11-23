@@ -107,6 +107,7 @@ PREREG = {
     "m4_perps": ("m4_residual_prereg.md", "m4_residual.md"),
 }
 EQ1_JSON = "etf_books_eq1.json"     # EQ1's study numbers per book, variant and broker (lab.experiments.etf_books_eq1)
+M4S2_JSON = "m4_step2.json"        # M4S2's step 2 per M4 book, its tested series stored (lab.experiments.m4_step2)
 # A paper book's name in T1's weekly leak check (lab.leak.checks.book_functions).
 LEAK_NAMES = {"tsmom": "families", "tsmom_regime": "families", "tsmom_top20": "families",
               "breakout_top10": "families", "memes_rotation": "memes", "memes_tsmom": "memes",
@@ -404,12 +405,57 @@ def eq1_row(c: dict, ctx: dict) -> dict | None:
             "paid_eur": b.get("paid_eur")}
 
 
+def m4s2_tested(c: dict, ctx: dict) -> list[dict]:
+    """Step 2 of m4_perps, perps_neutral and m4_hl_small from M4S2 (results/m4_step2.json): late and on-time CAGR at
+    the costs of their era over the band's days, both DSRs of the stored late series recomputed over today's registry
+    (m4s2_dsr), the highest PBO of the families the book's rule went through."""
+    r = (ctx.get("m4s2") or {}).get(c["name"]) or {}
+    p = f"research/lab/results/{M4S2_JSON}"
+    la, er, pb = r.get("late") or {}, r.get("era") or {}, r.get("pbo") or {}
+    span = f"M4S2, {r.get('first')} to {r.get('last')}"
+    lc, ec, pv = _num(la.get("cagr")), _num(er.get("cagr")), _num(pb.get("value"))
+    out = [cond("late", lc is not None and lc > 0, NO_RECORD if lc is None else
+                f"late CAGR {lc * 100:.1f} % a year, Sharpe {_num(la.get('sharpe')) or 0:.2f} ({span}, era costs)", p),
+           cond("era", ec is not None and ec > 0, NO_RECORD if ec is None else
+                f"on time at the era's costs CAGR {ec * 100:.1f} % a year ({span}); {er.get('proxy') or ''}", p)]
+    (dsr, dv), (fam, fv) = m4s2_dsr(r, ctx)
+    out += [cond("dsr_all", dsr is not None and dsr >= DSR_PASS, dv, p),
+            cond("dsr_family", fam is not None and fam >= DSR_PASS, fv, p)]
+    fs = [f"{x.get('label')} {x['pbo']:.2f}" for x in (pb.get("families") or {}).values()
+          if isinstance(x, dict) and _num(x.get("pbo")) is not None]
+    out.append(cond("pbo", pv is not None and pv < PBO_MAX, "not measured (T2 not run for it)" if pv is None else
+                    f"{pv:.2f}, the highest of its families ({'; '.join(fs)})", p))
+    return out
+
+
+def m4s2_dsr(r: dict, ctx: dict) -> tuple[tuple[float | None, str], tuple[float | None, str]]:
+    """(value, text) of the DSR over all and over the book's family of M4S2's stored late series, recomputed as the
+    study did (metrics.dsr) with N and the variance of today's pool of all and of the family."""
+    x = r.get("oos_returns")
+    if not isinstance(x, list) or not x:
+        return (None, NO_RECORD), (None, NO_RECORD)
+    pool = ctx.get("pool")
+    if pool is None:
+        why = "R5's registry not readable"
+        return (None, why), (None, why)
+    from .. import metrics
+    a = np.array([v for v in map(_num, x) if v is not None], dtype=float)
+    fam = r.get("family") or "hand"
+    n_all, n_fam = pool["n_trials"], pool["families"].get(fam, 0)
+    d_all = metrics.dsr(a, {"n_trials": n_all, "var": pool["var"]})
+    d_fam = metrics.dsr(a, {"n_trials": n_fam, "var": (pool.get("family_var") or {}).get(fam, pool["var"])})
+    return ((d_all, f"{d_all:.3f} recomputed over today's {n_all:,} trials (higher is better)"),
+            (d_fam, f"{d_fam:.3f} recomputed over today's {n_fam:,} {fam} trials (higher is better)"))
+
+
 def tested(c: dict, ctx: dict) -> list[dict]:
     """Step 2. The evidence, in order: R10's row (on-chain rules), else the factory's held-back row (EQ1's books:
-    their study, eq1_tested)."""
+    their study, eq1_tested; the M4 books: M4S2, m4s2_tested)."""
     out = [leak_cond(c, ctx)]
     if c.get("study") == "EQ1":
         return out + eq1_tested(c, ctx)
+    if c["kind"] == "book" and c["name"] in (ctx.get("m4s2") or {}):
+        return out + m4s2_tested(c, ctx)
     r10 = ctx["r10"].get(c.get("r10") or "")
     h = c.get("holdout")
     if r10:
@@ -1014,7 +1060,9 @@ def context(root: Path, results: Path = RESULTS, added=None, now: int | None = N
     pf = pf_context(root, now or notify.clock_ms()) if (root / PF_LEDGER).exists() or (root / PF_REPORT).exists() \
         else None
     from . import promote
-    return {"results": results, "eq1": eq, "added": added or git_added, "promo": promote.state(root), "r10": r10, "pbo": pbo, "pool": today_pool(),
+    m4 = notify.read_json(results / M4S2_JSON)
+    m4 = {str(k): v for k, v in (m4.get("books") or {}).items() if isinstance(v, dict)} if isinstance(m4, dict) else {}
+    return {"results": results, "eq1": eq, "m4s2": m4, "added": added or git_added, "promo": promote.state(root), "r10": r10, "pbo": pbo, "pool": today_pool(),
             "pf": pf,
             "leaks": {"weekly": {x.get("key") for x in _jsonl(fac / "leaks.jsonl")},
                       "F2": {x.get("key") for x in _jsonl(fac / "small" / "leaks.jsonl")}},
@@ -1029,7 +1077,7 @@ def context(root: Path, results: Path = RESULTS, added=None, now: int | None = N
 
 
 def today_pool() -> dict | None:
-    """Today's R5 pool for dsr_now: N of all and of each family, the variance of all and each factory family's
+    """Today's R5 pool for dsr_now and m4s2_dsr: N and the variance of all and of each family, each factory family's
     in-sample excess variance (the variance of all below ledger.EXCESS_MIN excess Sharpes, as ledger.pool); None
     when the registry cannot be read (every DSR then fails)."""
     try:
@@ -1041,7 +1089,8 @@ def today_pool() -> dict | None:
             v, n = ledger.excess_var(f)
             ev[f] = v if n >= ledger.EXCESS_MIN else p["var"]
         return {"n_trials": p["n_trials"], "var": p["var"], "excess_var": ev,
-                "families": {f: x["n_trials"] for f, x in p["families"].items()}}
+                "families": {f: x["n_trials"] for f, x in p["families"].items()},
+                "family_var": {f: x["var"] for f, x in p["families"].items()}}
     except Exception:  # noqa: BLE001 - fails closed: no pool, no DSR passes
         return None
 

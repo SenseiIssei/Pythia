@@ -650,6 +650,77 @@ def test_the_m4_preregistrations_were_committed_before_their_results():
         assert a[1] != b[1] and a[0] <= b[0]
 
 
+M4_COMMITS = {**COMMITS, "m4h2_prereg.md": (ts("2026-10-30"), "d4"), "m4h.md": (ts("2026-10-30") + 3600, "e5"),
+              "m4_residual_prereg.md": (ts("2026-10-21"), "f6"), "m4_residual.md": (ts("2026-10-21") + 3600, "g7"),
+              "perps_neutral_portfolio_prereg.md": (ts("2026-10-21"), "h8"),
+              "perps_neutral_portfolio.md": (ts("2026-10-21") + 3600, "i9")}
+
+
+def m4s2_books(data: Path, results: Path, series=None, **kw) -> None:
+    """The three M4 paper books, their pre-registrations, T1's passing rows and M4S2's results/m4_step2.json."""
+    for f in M4_COMMITS:
+        (results / f).write_text("# x\n", encoding="utf-8")
+    names = ("m4_perps", "perps_neutral", "m4_hl_small")
+    write(data, "reports/forward/latest.json", {"books": [{"kind": "book", "name": n, "since": "2026-10-30", "days": 9}
+                                                          for n in names]})
+    write(data, "reports/leak/latest.json", {"results": [{"kind": "book", "name": ladder.LEAK_NAMES[n], "ok": True}
+                                                         for n in names]})
+    x = list(np.random.default_rng(1).normal(0.02, 0.01, 910)) if series is None else series
+    row = {"first": "2024-01-01", "last": "2026-06-28", "late": {"cagr": kw.get("late", 0.3), "sharpe": 1.1},
+           "era": {"cagr": kw.get("era", 0.4), "sharpe": 1.3, "proxy": "Kraken's 5 bps taker for the whole window"},
+           "pbo": {"value": kw.get("pbo", 0.1), "families": {"fa": {"pbo": kw.get("pbo", 0.1), "n": 18,
+                                                                   "label": "reg7n's family"}}},
+           "dsr_all": 0.99, "pool_all": 10, "oos_returns": x}
+    (results / "m4_step2.json").write_text(json.dumps({"books": {
+        n: {**row, "family": "small" if n == "m4_hl_small" else "hand"} for n in names}}), encoding="utf-8")
+
+
+def test_the_m4_books_climb_on_m4s2s_record_with_the_dsr_recomputed(env):
+    # results/m4_step2_prereg.md: M4S2's five rows per book; the DSRs from the stored series over today's registry
+    data, results = env
+    m4s2_books(data, results)
+    rows = run(env, M4_COMMITS)
+    pool = metrics.trial_pool()
+    for n in ("m4_perps", "perps_neutral", "m4_hl_small"):
+        r = rows[f"book:{n}"]
+        assert r["step"] == 2 and set(r["missing"]) == {"days", "before"}, (n, r["next"])
+        v = {x["id"]: x["value"] for x in r["steps"]["2"]}
+        assert "30.0 %" in v["late"] and "40.0 %" in v["era"] and "Kraken's 5 bps" in v["era"]
+        assert f"recomputed over today's {pool['n_trials']:,} trials" in v["dsr_all"]
+        fam = "small" if n == "m4_hl_small" else "hand"
+        assert f"{pool['families'][fam]['n_trials']:,} {fam} trials" in v["dsr_family"]
+        assert "0.10, the highest of its families (reg7n's family 0.10)" in v["pbo"]
+        assert ladder.NO_RECORD not in r["next"]
+    noise = list(np.random.default_rng(2).normal(0.0, 0.01, 910))
+    m4s2_books(data, results, series=noise)
+    r = run(env, M4_COMMITS)["book:m4_perps"]
+    want = metrics.dsr(np.array(noise), {"n_trials": pool["n_trials"], "var": pool["var"]})
+    assert r["step"] == 1 and r["missing"] == ["dsr_all", "dsr_family"] and f"{want:.3f} recomputed" in r["next"]
+
+
+
+@pytest.mark.parametrize("kw, miss", [({"late": -0.01}, ["late"]), ({"era": -0.02}, ["era"]),
+                                      ({"pbo": 0.55}, ["pbo"]), ({"pbo": None}, ["pbo"])])
+def test_each_m4s2_row_holds_an_m4_book_at_step_1(env, kw, miss):
+    data, results = env
+    m4s2_books(data, results, **kw)
+    r = run(env, M4_COMMITS)["book:perps_neutral"]
+    assert r["step"] == 1 and r["missing"] == miss
+    if kw.get("pbo", 0) is None:
+        assert "not measured" in r["next"]
+
+
+def test_an_m4s2_row_without_its_series_has_no_tested_dsr(env, monkeypatch):
+    data, results = env
+    m4s2_books(data, results, series=[])
+    r = run(env, M4_COMMITS)["book:m4_hl_small"]
+    assert r["missing"] == ["dsr_all", "dsr_family"] and "no tested record" in r["next"]
+    m4s2_books(data, results)
+    monkeypatch.setattr(ladder, "today_pool", lambda: None)
+    r = run(env, M4_COMMITS)["book:m4_hl_small"]
+    assert r["missing"] == ["dsr_all", "dsr_family"] and "not readable" in r["next"]
+
+
 def test_one_total_for_the_header_and_the_pumpfun_dsrs(env):
     # results/trial_audit_prereg.md: the header, the pump.fun DSRs and the weekly page count R5 plus F3's ledger
     data, results = env
