@@ -1,7 +1,9 @@
 """W1: one weekly page of what matters (results/weekly_page_w1_prereg.md), Sunday 18:00 UTC.
 
 The owner's goal on top (180 EUR net profit a month): how far the live bot and the paper books are from it this
-week, and per candidate on the ladder the capital it would need (W2, results/weekly_capital_line_prereg.md: 30 days of
+week (the paper line by W2's rule, W3, results/weekly_paper_line_prereg.md: the sum a month of the books with 30
+days and a band at their real capped stake, wallet growth only as a line that does not count), and per candidate on
+the ladder the capital it would need (W2, results/weekly_capital_line_prereg.md: 30 days of
 record, the lower end of the 95 % band, pump.fun per trade less P2's gap at the live stake cap, a fill gap taken
 off). Then what moved on
 the ladder, the books' week, paper minus live, the lanes' results, what is red and since when, disk and data, the
@@ -20,7 +22,7 @@ missing report is said as missing ("fehlt").
   _ops/disk/latest.json                 disk and data growth
 
 No new number: the reports' numbers and the pre-registered arithmetic (a week against the page's own snapshot of
-the week before, reports/weekly/<date>.json; times 30/7 for a month; W2's capital line). No trial. Reads only and writes nothing but reports/weekly/; never arms, changes or sends anything but the page.
+the week before, reports/weekly/<date>.json; times 30/7 for a month; W2's capital line, W3's paper line). No trial. Reads only and writes nothing but reports/weekly/; never arms, changes or sends anything but the page.
 
   python -m lab.ops.weekly             write the page and post the short version (category "studies")
   python -m lab.ops.weekly --print     print the page, write and post nothing
@@ -43,6 +45,8 @@ CAPITAL_ROWS = 5                # candidates with a capital line, the cheapest f
 MIN_RECORD_DAYS = 30.0          # W2: no capital figure under 30 days of record
 Z95 = 1.96                      # W2: the 95 % band's lower end, normal
 CAPITAL_RULE = "research/lab/results/weekly_capital_line_prereg.md"
+PAPER_RULE = "research/lab/results/weekly_paper_line_prereg.md"
+TEN_SHARE = 0.5                 # W3: P3's share of a 10 EUR wallet a trade (pumpfun_rt.realistic.TEN_SHARE)
 LANE_TITLES = 6                 # titles of the week's lanes on the page, the rest counted
 STATE_DE = {"failed": "fehlgeschlagen", "late": "überfällig", "never": "nie gelaufen"}
 VERDICT_DE = {"not yet": "noch nicht", "calibrated": "kalibriert", "not calibrated": "nicht kalibriert"}
@@ -268,6 +272,42 @@ def capital(r: dict, b: dict | None, pf: dict, fwd: dict, hist) -> dict:
     return {"kind": "cap", "eur": GOAL_EUR / m, "m": m, "gap": gap[0] if gap else None, "days": days}
 
 
+def paper_month(b: dict, pf: dict, fwd: dict, hist) -> dict:
+    """One paper book under W3 (results/weekly_paper_line_prereg.md): {"kind": "add", "eur": its figure a month} or
+    {"kind": "short" | "unknown" | "no_eur"}. W2's arithmetic: a paper book's lower monthly band less the fill gap
+    times the money paid in (EUR); a 10 EUR pump.fun book per trade, (lower end per entry - P2's gap) x its stake x
+    sol_eur x trades a month, its stake the live cap or P3's share of its wallet now where that is less."""
+    p3 = b.get("p3")
+    if isinstance(p3, dict):
+        band = p3.get("band") if isinstance(p3.get("band"), list) and len(p3["band"]) == 2 else [None]
+        lo, n, days = _n(band[0]), _n(p3.get("trades")), _n(p3.get("days"))
+        if lo is None or not n or not days:
+            return {"kind": "unknown"}
+        if days < MIN_RECORD_DAYS:
+            return {"kind": "short", "days": days}
+        if None in (pf["gap"], pf["cap"], pf["sol_eur"]):
+            return {"kind": "unknown"}
+        stake = min(pf["cap"], TEN_SHARE * b["value"]) if b.get("value") is not None else pf["cap"]
+        edge, tpm = lo - pf["gap"] / 100, n / days * MONTH_DAYS
+        return {"kind": "add", "eur": edge * stake * pf["sol_eur"] * tpm, "pumpfun": True, "stake_sol": stake}
+    if b.get("currency") == "SOL":                                           # R2's and F3's books carry no band
+        return {"kind": "unknown"}
+    days = record_days(b, fwd)
+    if days < MIN_RECORD_DAYS:
+        return {"kind": "short", "days": days}
+    pts = hist(b["report"], b["name"])
+    m = lower_monthly(pts)
+    if m is None:
+        return {"kind": "unknown"}
+    gap = fill_gap(fwd, b["name"])
+    if gap:
+        m -= gap[1]
+    paid = pts[-1][2] if b.get("currency") == "EUR" else 0.0
+    if not paid or paid <= 0:
+        return {"kind": "no_eur", "days": days}
+    return {"kind": "add", "eur": m * paid, "m": m, "paid": paid}
+
+
 # ---------------------------------------------------------------- the page
 
 def build(root: Path, now: int) -> dict:
@@ -324,44 +364,67 @@ def build(root: Path, now: int) -> dict:
                          f"({how}), auf 30 Tage {eur(m, True)}, zum Ziel fehlen {eur(max(GOAL_EUR - m, 0))}"
                          + src(*files, REALISTIC))
             short.append(f"Live: Woche {eur(week * sol_eur, True)}, Monat {eur(m, True)}, fehlen {eur(max(GOAL_EUR - m, 0))}")
+    # W2's inputs: P2's gap, the live ack's cap and share, forward's fill gaps; the books' dated reports
+    ack = (live or {}).get("ack") if isinstance(live, dict) else None
+    ack = ack if isinstance(ack, dict) else {}
+    sel = (real or {}).get("selection")
+    pf = {"gap": _n(sel.get("pts")) if isinstance(sel, dict) else None, "cap": _n(ack.get("max_trade_sol")),
+          "share": _n(ack.get("stake_share")), "sol_eur": sol_eur}
+    fwd = read("reports/forward/latest.json")
+    fwd = fwd if isinstance(fwd, dict) else {}
+    cache: dict = {}
+    hist = lambda rel, name: history(root, rel, name, cache)  # noqa: E731
+    cut = lambda xs: ", ".join(str(x[0]) for x in xs[:8]) + (", ..." if len(xs) > 8 else "")  # noqa: E731
+
+    # the paper line, W3 (results/weekly_paper_line_prereg.md): the capital rule's figures a month, never wallet growth
+    pm: dict[str, list] = {"add": [], "short": [], "unknown": [], "no_eur": []}
+    for b in books:
+        c = paper_month(b, pf, fwd, hist)
+        pm[c["kind"]].append((b["name"], c, b))
+    m = sum(c["eur"] for _, c, _ in pm["add"])
+    lines.append(f"Papier nach der Kapital-Regel: {eur(m, True)} im Monat aus {len(pm['add'])} Büchern mit "
+                 f"{de(MIN_RECORD_DAYS, 0)} Tagen und Band (untere Grenze des 95-%-Bands mal eingezahltes Geld; "
+                 "pump.fun je Trade minus P2s Lücke beim Einsatz von höchstens "
+                 + (i18n.sol(pf["cap"], 2, "de") if pf["cap"] is not None else "(fehlt)")
+                 + f"), zum Ziel fehlen {eur(max(GOAL_EUR - m, 0))}"
+                 + (": " + "; ".join(f"{n} {eur(c['eur'], True)}" for n, c, _ in
+                                     sorted(pm["add"], key=lambda x: -x[1]["eur"])) if pm["add"] else "")
+                 + src(PAPER_RULE, PAPER))
+    why = [(f"{len(pm['short'])} unter {de(MIN_RECORD_DAYS, 0)} Tagen",
+            sorted(pm["short"], key=lambda x: -x[1]["days"])),
+           (f"{len(pm['unknown'])} ohne Band", pm["unknown"]), (f"{len(pm['no_eur'])} ohne Einsatz in EUR", pm["no_eur"])]
+    if any(xs for _, xs in why):
+        lines.append("Papier, nicht addiert: " + "; ".join(f"{w} ({cut(xs)})" for w, xs in why if xs) + src(PAPER))
+    short.append(f"Papier (Kapital-Regel): Monat {eur(m, True)} aus {len(pm['add'])} Büchern, "
+                 f"fehlen {eur(max(GOAL_EUR - m, 0))}")
     pb = {k: v for k, v in ((prev or {}).get("books") or {}).items() if isinstance(v, list) and len(v) == 2}
     priced = [b for b in books if b["eur"] is not None]
     if not priced:
-        lines.append("Papier: kein Buch in EUR oder SOL" + src(REALISTIC, "reports/smallaccount/latest.json"))
+        lines.append("Wallet-Wachstum, zählt nicht: kein Buch in EUR oder SOL"
+                     + src(REALISTIC, "reports/smallaccount/latest.json"))
     elif prev:
         rate = {"EUR": 1.0, "SOL": sol_eur}
         both = [b for b in priced if b["name"] in pb and pb[b["name"]][1] == b["currency"] and _n(pb[b["name"]][0]) is not None]
         week = sum((b["value"] - pb[b["name"]][0]) * rate[b["currency"]] for b in both)
-        m = week * MONTH_DAYS / 7
-        lines.append(f"Papier: Woche {eur(week, True)} über {len(both)} Bücher in EUR und SOL, auf 30 Tage "
-                     f"{eur(m, True)}, zum Ziel fehlen {eur(max(GOAL_EUR - m, 0))}" + src(prev["file"], PAPER))
-        short.append(f"Papier: Woche {eur(week, True)}, Monat {eur(m, True)}")
+        lines.append(f"Wallet-Wachstum, zählt nicht: Woche {eur(week, True)} über {len(both)} Bücher in EUR und SOL, "
+                     f"auf 30 Tage {eur(week * MONTH_DAYS / 7, True)}" + src(prev["file"], PAPER))
     else:
         got = [b for b in priced if b["pnl_eur"] is not None and (b.get("days") or 0) >= 1]
-        m = sum(b["pnl_eur"] * MONTH_DAYS / b["days"] for b in got)
-        lines.append(f"Papier: {len(got)} Bücher in EUR und SOL, seit Start auf 30 Tage {eur(m, True)}, zum Ziel "
-                     f"fehlen {eur(max(GOAL_EUR - m, 0))} (keine Vorwoche)" + src(PAPER))
-        short.append(f"Papier: Monat seit Start {eur(m, True)}")
+        lines.append(f"Wallet-Wachstum, zählt nicht: {len(got)} Bücher in EUR und SOL, seit Start auf 30 Tage "
+                     f"{eur(sum(b['pnl_eur'] * MONTH_DAYS / b['days'] for b in got), True)} (keine Vorwoche)"
+                     + src(PAPER))
 
     # capital per ladder candidate, W2 (results/weekly_capital_line_prereg.md)
     rows = (lad or {}).get("rows") if isinstance(lad, dict) else None
     if rows is None:
         lines.append(missing("Kapital je Kandidat", LADDER))
     else:
-        by, cache = {b["name"]: b for b in books}, {}
-        ack = (live or {}).get("ack") if isinstance(live, dict) else None
-        ack = ack if isinstance(ack, dict) else {}
-        sel = (real or {}).get("selection")
-        pf = {"gap": _n(sel.get("pts")) if isinstance(sel, dict) else None, "cap": _n(ack.get("max_trade_sol")),
-              "share": _n(ack.get("stake_share")), "sol_eur": sol_eur}
-        fwd = read("reports/forward/latest.json")
-        fwd = fwd if isinstance(fwd, dict) else {}
+        by = {b["name"]: b for b in books}
         got: dict[str, list] = {"cap": [], "none": [], "unreachable": [], "short": [], "unknown": []}
         for r in rows:
             b = by.get(r.get("name")) if r.get("kind") in ("book", "rule") else None
-            c = capital(r, b, pf, fwd, lambda rel, name: history(root, rel, name, cache))
+            c = capital(r, b, pf, fwd, hist)
             got[c["kind"]].append((r.get("name"), c, b))
-        cut = lambda xs: ", ".join(str(x[0]) for x in xs[:8]) + (", ..." if len(xs) > 8 else "")  # noqa: E731
         lines.append(f"Kapital-Regel: eine Zahl nur ab {de(MIN_RECORD_DAYS, 0)} Tagen Aufzeichnung, aus der unteren "
                      f"Grenze des 95-%-Bands; pump.fun je Trade (untere Grenze je Einstieg minus P2s Lücke "
                      + (f"{de(pf['gap'], 1, True)} Punkte" if pf["gap"] is not None else "(fehlt)")

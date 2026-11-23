@@ -113,8 +113,8 @@ def test_goal_live_paper_and_capital(root):
     # live: -0.4 against -0.3 a week ago = -0.1 SOL = -9 EUR, a month -38.57 EUR
     assert "Live (pump.fun-Bot): Woche -0,1000 SOL = -9,00 € (Gesamt-P&L gegen 2026-10-25), auf 30 Tage -38,57 €, " \
            "zum Ziel fehlen 218,57 €" in t
-    # paper: 41 against 40 EUR = +1 EUR in the week
-    assert "Papier: Woche +1,00 € über 1 Bücher in EUR und SOL, auf 30 Tage +4,29 €, zum Ziel fehlen 175,71 €" in t
+    # wallet growth: 41 against 40 EUR = +1 EUR in the week, a line that does not count (W3)
+    assert "Wallet-Wachstum, zählt nicht: Woche +1,00 € über 1 Bücher in EUR und SOL, auf 30 Tage +4,29 € (" in t
     # W2: small40_spy_trend made +2.5 % in 11 days, under 30 days no figure; tsmom has 30 days but no dated reports
     assert "Kapital für" not in t
     assert "Kapital-Regel: eine Zahl nur ab 30 Tagen Aufzeichnung" in t and "minus P2s Lücke +1,5 Punkte" in t
@@ -396,3 +396,94 @@ def test_days_without_a_run_are_no_days_of_record(root):
     write(root, "reports/forward/latest.json", lat)
     t = page_text(root)
     assert cap_line(t, "steady") is None and "unter 30 Tagen Aufzeichnung: steady" in t
+
+
+# ---- W3: the paper line by the capital rule (results/weekly_paper_line_prereg.md)
+
+def paper_line(t: str) -> str:
+    return next(ln for ln in t.splitlines() if ln.startswith("Papier nach der Kapital-Regel:"))
+
+
+def small_book(root: Path, name: str, steps: list[float], capital: float = 40.0) -> None:
+    """A small-account EUR book started 2026-10-01 with one dated report a day, its equity compounding `steps`."""
+    eq = capital
+    for i in range(len(steps) + 1):
+        if i:
+            eq *= 1 + steps[i - 1]
+        t = int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp() * 1000 + i * DAY)
+        rel = f"reports/smallaccount/{weekly.day(t)}.json"
+        p = root / rel
+        d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"books": {}}
+        d["books"][name] = {"started": "2026-10-01T00:00:00+00:00", "capital_eur": capital, "equity_eur": eq}
+        write(root, rel, d)
+    lat = json.loads((root / "reports/smallaccount/latest.json").read_text(encoding="utf-8"))
+    lat["books"][name] = {"variant": "EXPERIMENT, paper only · S1 small account · 40 EUR paper wallet · x · daily",
+                          "started": "2026-10-01T00:00:00+00:00", "capital_eur": capital, "equity_eur": eq}
+    write(root, "reports/smallaccount/latest.json", lat)
+
+
+def ten_book(root: Path, sol: float, lo: float = 0.12, gap: float = 1.5, trades: int = 3000, days: float = 30.0):
+    real = json.loads((root / "reports/pumpfun_rt/realistic.json").read_text(encoding="utf-8"))
+    real["selection"]["pts"] = gap
+    real["ten"] = [{"book": "P_grow_10eur", "strategy": "P_grow", "start_sol": 0.109, "sol": sol, "trades": trades,
+                    "band": [lo, lo + 0.04], "days": days, "since_ms": NOW - int(days * DAY), "pass": False}]
+    write(root, "reports/pumpfun_rt/realistic.json", real)
+    write(root, "reports/pumpfun_rt/live_status.json", {"pnl_total_sol": -0.4, "ack": {"max_trade_sol": 0.05,
+                                                                                       "stake_share": 0.25}})
+
+
+def test_paper_line_no_book_counts(root):
+    page = weekly.build(root, NOW)
+    t = "\n".join(page["lines"])
+    line = paper_line(t)
+    assert line.startswith("Papier nach der Kapital-Regel: +0,00 € im Monat aus 0 Büchern mit 30 Tagen und Band")
+    assert "zum Ziel fehlen 180,00 €" in line and "weekly_paper_line_prereg.md" in line
+    # small40_spy_trend has 10 days, tsmom 30 days but no dated reports: named, not added
+    assert "Papier, nicht addiert: 1 unter 30 Tagen (small40_spy_trend); 1 ohne Band (tsmom) (" in t
+    assert "Papier (Kapital-Regel): Monat +0,00 € aus 0 Büchern, fehlen 180,00 €" in page["short"]
+    assert not any(s.startswith("Papier: ") or "Wallet" in s for s in page["short"])
+    assert "Papier: Woche" not in t and "Wallet-Wachstum, zählt nicht: Woche +1,00 €" in t
+
+
+def test_paper_line_one_book_counts_at_its_money_paid_in(root):
+    small_book(root, "small40_steady", steady(), 40.0)     # 31 days, grew about 17 %: the band times 40, not 46.8
+    forward_book(root, "steady", steady())                 # a forward book in %: no stake in EUR, not added
+    m = expected_lower(steady())
+    t = page_text(root)
+    line = paper_line(t)
+    assert f"{weekly.eur(m * 40, True)} im Monat aus 1 Büchern" in line
+    assert f"zum Ziel fehlen {weekly.eur(180 - m * 40)}" in line and f": small40_steady {weekly.eur(m * 40, True)} (" in line
+    assert "1 ohne Einsatz in EUR (steady)" in t
+
+
+def test_paper_line_pumpfun_cap_and_p2_gap(root):
+    # a 10 EUR book that grew to 5.9 SOL: half its wallet would be 2.95 SOL a trade, the cap takes 0.05;
+    # lower end +12 % minus P2's 1.5 points = 10.5 % x 0.05 SOL x 90 EUR x 3,000 trades = 1,417.50 EUR a month
+    ten_book(root, 5.9)
+    line = paper_line(page_text(root))
+    assert ": P_grow_10eur +1.417,50 € (" in line and "+1.417,50 € im Monat aus 1 Büchern" in line
+    assert "beim Einsatz von höchstens 0,05 SOL" in line and "zum Ziel fehlen 0,00 €" in line
+    # P2's gap at 8.8 points: (0.12 - 0.088) x 4.5 x 3,000 = 432 EUR
+    ten_book(root, 5.9, gap=8.8)
+    assert ": P_grow_10eur +432,00 € (" in paper_line(page_text(root))
+    # a band per entry below P2's gap is added as it is: (0.0074 - 0.088) x 4.5 x 3,000 = -1,088.10 EUR
+    ten_book(root, 5.9, lo=0.0074, gap=8.8)
+    line = paper_line(page_text(root))
+    assert "-1.088,10 € im Monat aus 1 Büchern" in line and "zum Ziel fehlen 1.268,10 €" in line
+
+
+def test_paper_line_pumpfun_stake_under_the_cap(root):
+    # a wallet that shrank to 0.06 SOL stakes half of it, 0.03 SOL: 0.105 x 0.03 x 90 x 3,000 = 850.50 EUR
+    ten_book(root, 0.06)
+    assert ": P_grow_10eur +850,50 € (" in paper_line(page_text(root))
+    from lab.pumpfun_rt import realistic
+    assert weekly.TEN_SHARE == realistic.TEN_SHARE
+    # under 30 days or without the live cap: not added
+    ten_book(root, 5.9, days=20.0)
+    t = page_text(root)
+    assert "aus 0 Büchern" in paper_line(t) and "2 unter 30 Tagen (P_grow_10eur, small40_spy_trend)" in t
+    ten_book(root, 5.9)
+    write(root, "reports/pumpfun_rt/live_status.json", {"pnl_total_sol": -0.4})
+    t = page_text(root)
+    assert "aus 0 Büchern" in paper_line(t) and "höchstens (fehlt)" in paper_line(t)
+    assert "2 ohne Band (P_grow_10eur, tsmom)" in t
