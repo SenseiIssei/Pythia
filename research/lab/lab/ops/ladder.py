@@ -834,6 +834,7 @@ def pf_context(root: Path, now: int) -> dict:
     rj = rj if isinstance(rj, dict) else {}
     out = {"read": read, "since": since, "n_all": n_all, "n_fam": n_fam, "n_f3": n_f3, "lat2x": lat,
            "selection": rj.get("selection") if isinstance(rj.get("selection"), dict) else None,
+           "selection_r2": rj.get("selection_r2") if isinstance(rj.get("selection_r2"), dict) else None,
            "ten": {str(t.get("book")): t for t in rj.get("ten") or [] if isinstance(t, dict)}, "rules": {},
            "first": {}}
     for r in rows:                                            # step 1's first number: the rule's first ledger day
@@ -893,13 +894,26 @@ def pf_lockbox(c: dict, ctx: dict) -> list[dict]:
     return [cond("pf_fresh", bool(x["fresh_day"]), v, PF_LEDGER)]
 
 
+def r2_text(r2: dict | None) -> str:
+    """P2R2's number next to P2's (results/pumpfun_selection_gap_p2r2_prereg.md): shown, the gate reads P2's."""
+    pts = _num((r2 or {}).get("pts"))
+    if pts is None:
+        return ""
+    band = r2.get("band") if isinstance(r2.get("band"), list) and len(r2["band"]) == 2 else None
+    return (f"; realistic era only {pts:+.1f} (P2R2, band " + ("n/a" if band is None else
+            f"{band[0]:+.1f} to {band[1]:+.1f}") + f", {r2.get('n_live') or 0} live trades on "
+            f"{r2.get('days_live') or 0} days" + ("" if r2.get("judged") else ", too few to judge")
+            + "; the gate reads P2's, a switch is the owner's)")
+
+
 def pf_execution(c: dict, ctx: dict) -> list[dict]:
     """Step 5: P2's selection gap (under 2 points) and P3's gate of the rule's 10 EUR book; absent is open."""
     pf, p = ctx["pf"], PF_REPORT
     sel = pf["selection"]
     pts = _num((sel or {}).get("pts"))
     gap = cond("p3_gap", None, "open: no P2 selection gap in realistic.json", p) if sel is None else \
-        cond("p3_gap", sel.get("pass") is True, "not measured" if pts is None else f"{pts:+.1f} points (P2)", p)
+        cond("p3_gap", sel.get("pass") is True, ("not measured" if pts is None else f"{pts:+.1f} points (P2)")
+             + r2_text(pf.get("selection_r2")), p)
     ten = pf["ten"].get(f"{c['name']}_10eur")
     if ten is None:
         return [gap, cond("p3_book", None, "open: no 10 EUR paper book (P3) for it", p)]

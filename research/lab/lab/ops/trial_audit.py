@@ -203,6 +203,8 @@ DECLARED: list[tuple[str, str, int, str, str, str]] = [
      'Trials: 10 (`strategies.SELECT_Y9_TRIALS`).', ''),
     ('pumpfun_selection_gap_p2', 'hand', 5, 'pumpfun_selection_gap_p2.md',
      "Five trials in R5's registry, counted only (`hand:p2:*`); no Sharpe, no DSR.", ''),
+    ('pumpfun_selection_gap_p2r2', 'hand', 5, 'pumpfun_selection_gap_p2r2.md',
+     "Five trials in R5's registry, counted only (`hand:p2r2:*`); no Sharpe, no DSR.", ''),
     ('pumpfun_shapes_y17', 'pumpfun', 4, 'pumpfun_shapes_y17_prereg.md',
      'A coin younger than 10 s at the signal keeps its entry. 4 trials.', ''),
     ('pumpfun_smallwallet_r2', 'pumpfun', 336, 'pumpfun_smallwallet_r2_prereg.md',

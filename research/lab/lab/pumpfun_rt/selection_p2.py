@@ -113,11 +113,11 @@ def on(rs: list[dict], rule: str, t: float) -> bool:
 
 # ---------------------------------------------------------------- the paper signals and their live outcome
 
-def paper_signals(paper: dict, rs: list[dict]) -> tuple[list[dict], dict[str, int]]:
+def paper_signals(paper: dict, rs: list[dict], skip_stale: bool = False) -> tuple[list[dict], dict[str, int]]:
     """The first row (ledger or failed buy) of each rule and coin signalled while a live run of the rule was on:
     [{rule, mint, t, ret (None for a failed buy), symbol}], and the rows left out (tainted by P1, closed by a
-    restart)."""
-    left = {"tainted": 0, "restart": 0}
+    restart, with skip_stale filled on a stale pool state: realistic.stale, P2R2)."""
+    left = {"tainted": 0, "restart": 0} | ({"stale": 0} if skip_stale else {})
     first: dict[tuple[str, str], dict] = {}
     for src, rows in (("ledger", paper.get("ledger") or []), ("failed", paper.get("failed") or [])):
         for r in rows:
@@ -129,6 +129,9 @@ def paper_signals(paper: dict, rs: list[dict]) -> tuple[list[dict], dict[str, in
                 continue
             if src == "ledger" and r.get("exit_why") == "restart":
                 left["restart"] += 1
+                continue
+            if src == "ledger" and skip_stale and R.stale(r):
+                left["stale"] += 1
                 continue
             k = (r["rule"], r["mint"])
             if k not in first or t < first[k]["t"]:
@@ -207,7 +210,7 @@ def outcome(live: dict, signals: list[dict]) -> list[dict]:
     return out
 
 
-def live_only(live: dict, paper: dict, sig: list[dict]) -> list[dict]:
+def live_only(live: dict, paper: dict, sig: list[dict], skip_stale: bool = False) -> list[dict]:
     """The live closed trades no paper signal matched, each with the paper's reason. "no paper record" says
     whether the paper twin had not started yet (before its rule's first paper row) or the collector still had the
     coin (a paper row of another book or a paper skip)."""
@@ -240,6 +243,9 @@ def live_only(live: dict, paper: dict, sig: list[dict]) -> list[dict]:
             why = "paper row tainted (P1)"
         elif nr and all(p["_src"] == "failed" or R.tainted(p) or p.get("exit_why") == "restart" for p in nr):
             why = "paper closed by a restart"
+        elif nr and skip_stale and all(p["_src"] == "failed" or R.tainted(p) or p.get("exit_why") == "restart"
+                                       or R.stale(p) for p in nr):
+            why = "paper row on a stale pool state"
         elif nr:
             why = "paper's first entry of the coin matched elsewhere"
         elif prow.get(k):
@@ -298,12 +304,13 @@ def gap(sig: list[dict], live_trades: list[float], draws: int = DRAWS, seed: int
     return out | {k: (float(v) if np.isfinite(v) else None) for k, v in est.items()} | {"band": band}
 
 
-def compute(live: dict, paper: dict, since: float | None = None) -> dict:
-    """The whole study over every live run (since None) or over the signals and live trades at or after since."""
+def compute(live: dict, paper: dict, since: float | None = None, skip_stale: bool = False) -> dict:
+    """The whole study over every live run (since None) or over the signals and live trades at or after since;
+    skip_stale leaves the paper rows on a stale pool state out (P2R2). `live`: the live trades' (signal_ms, ret)."""
     rs, dropped = runs(live)
-    sig, left = paper_signals(paper, rs)
+    sig, left = paper_signals(paper, rs, skip_stale)
     sig = outcome(live, sig)
-    lo = live_only(live, paper, sig)
+    lo = live_only(live, paper, sig, skip_stale)
     lt = [r for r in live.get("ledger") or [] if r.get("mode") in ("test", "full") and r.get("rule") in RULES
           and R._f(r.get("signal_ms")) is not None]
     if since is not None:
@@ -312,7 +319,7 @@ def compute(live: dict, paper: dict, since: float | None = None) -> dict:
         lt = [r for r in lt if R._f(r["signal_ms"]) >= since]
     g = gap(sig, [R._f(r.get("ret")) for r in lt])
     return {"runs": rs, "runs_dropped": dropped, "left_out": left, "signals": sig, "live_only": lo, "gap": g,
-            "since": since}
+            "since": since, "live": [(R._f(r["signal_ms"]), R._f(r.get("ret"))) for r in lt]}
 
 
 # ---------------------------------------------------------------- the report

@@ -591,6 +591,21 @@ def test_a_missing_ten_section_stays_open_and_blocks_step_5(env):
     assert pf_run(env)["pumpfun:P_pool0_wait"]["step"] == 5
 
 
+def test_p2r2_is_shown_next_to_p2_and_the_gate_reads_p2():
+    # results/pumpfun_selection_gap_p2r2_prereg.md: the realistic-era line beside P2's, P3's gate unchanged
+    r2 = {"pts": 0.5, "band": [-1.9, 18.0], "n_live": 37, "days_live": 2, "judged": False}
+    txt = ladder.r2_text(r2)
+    assert "realistic era only +0.5 (P2R2, band -1.9 to +18.0, 37 live trades on 2 days, too few to judge" in txt
+    assert "the gate reads P2's" in txt and ladder.r2_text(None) == "" and ladder.r2_text({"pts": None}) == ""
+    assert "too few" not in ladder.r2_text({**r2, "judged": True})
+    ctx = {"pf": {"selection": {"pts": 8.8, "pass": False}, "selection_r2": r2, "ten": {}}}
+    gap = ladder.pf_execution({"name": "P_pool0"}, ctx)[0]
+    assert gap["ok"] is False and gap["value"].startswith("+8.8 points (P2); realistic era only +0.5 (P2R2")
+    ctx["pf"]["selection"] = {"pts": 1.0, "pass": True}
+    ctx["pf"]["selection_r2"] = {**r2, "pts": 9.0}
+    assert ladder.pf_execution({"name": "P_pool0"}, ctx)[0]["ok"] is True
+
+
 def test_the_fresh_days_alone_judge_step_4():
     # an edge before the pre-registration, noise after it: step 3's e-process crosses, step 4's on the fresh days not
     rng = np.random.default_rng(3)

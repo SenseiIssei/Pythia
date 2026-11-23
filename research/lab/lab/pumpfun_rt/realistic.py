@@ -1163,6 +1163,12 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
     except Exception as e:                                   # noqa: BLE001 - the report goes out without it
         print(f"realistic: no selection gap ({type(e).__name__}: {e})", flush=True)
         out["selection"] = None
+    try:                                                     # P2R2: the same on the realistic era only, shown only
+        from .selection_p2r2 import gate as gate_r2
+        out["selection_r2"] = gate_r2(data_dir(), paper_dir(), paper)
+    except Exception as e:                                   # noqa: BLE001 - the report goes out without it
+        print(f"realistic: no P2R2 gap ({type(e).__name__}: {e})", flush=True)
+        out["selection_r2"] = None
     try:                                                     # P3: the 10 EUR books, their trials first
         from .. import metrics
         metrics.register(ten_trials())
@@ -1227,6 +1233,7 @@ def markdown(d: dict) -> str:
         "# pump.fun realistic paper", "",
         d["calibration"]["line"], "",
         *([d["selection"]["line"], ""] if (d.get("selection") or {}).get("line") else []),
+        *([d["selection_r2"]["line"], ""] if (d.get("selection_r2") or {}).get("line") else []),
         *([f"The paper ledger holds {d['tainted']} trades the late-row bug made before {FIX_DAY}; every reader "
            "skips them (P1, results/pumpfun_ledger_taint_p1.md).", ""] if d.get("tainted") else []),
         *([f"It holds {d['stale']} trades of the restated books filled on a stale pool state before the fix; the P3, "
