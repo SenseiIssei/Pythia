@@ -145,6 +145,8 @@ DECLARED: list[tuple[str, str, int, str, str, str]] = [
      "None registered by this run: the PBO and CPCV above are on genomes already counted, in sample only, and the zoo's", ''),
     ('pead_xbrl', 'hand', 4, 'pead_xbrl.md',
      'positioning_xs 5, taker_imbalance_xs 13, hedged_breakout 2, pead_xbrl 4', 'hand:positioning_taker_hedged_pead'),
+    ('perps_books_c2', 'hand', 0, 'perps_books_c2_prereg.md',
+     "None. The collector makes no performance number, so no trial goes to R5's registry.", ''),
     ('perps_neutral_portfolio', 'hand', 3, 'perps_neutral_portfolio.md',
      '25 registered together on 2026-10-21: perps_neutral_portfolio 3, attention_wiki 13, intraday_tsmom 9', 'hand:perps_attention_intraday'),
     ('pit_universe_t5', 'hand', 18, 'pit_universe_t5.md',
