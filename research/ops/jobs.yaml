@@ -1325,6 +1325,23 @@ jobs:
     timeout: 45m
     alert: false
 
+  # C2 (research/lab/results/perps_books_c2_prereg.md): 20 levels a side of the m4_perps universe on Kraken Futures
+  # and the m4_hl_small universe on Hyperliquid every 5 minutes (the runs at 05:15 and 06:00 are the books'
+  # rebalance snapshots), public endpoints, no key, one call every 0.5 s per venue, a 429 backed off and named in
+  # the feed row. Its own light lock, not heavy: a long factory night never holds it back. The day's first run
+  # reads one day of the xs_daily panel cache. <data>/perps_books, about 20 MB a day; reports/perps_books.
+  # Data only: no book, study, bot or engine reads it yet.
+  - name: perps-books
+    description: C2 order books of the m4_perps (Kraken Futures) and m4_hl_small (Hyperliquid) universes, 20 levels a side every 5 minutes, coverage report reports/perps_books
+    schedule: "*/5 * * * *"
+    command: python -m lab.collect.perps_books
+    env: {PYTHIA_CACHE: /data/lab-cache}
+    resources: {cpus: 1, memory: 1g}
+    timeout: 4m
+    grace: 15m
+    lock: perps-books
+    alert: false
+
   - name: free-feargreed
     description: Crypto Fear and Greed index (alternative.me), daily, its whole history on the first run
     schedule: "20 0 * * *"
@@ -1601,6 +1618,12 @@ datasets:
     max_gb: 45
     max_age_h: 48
 
+  - name: perps-books
+    description: C2 order book snapshots of the M4 perps universes on Kraken Futures and Hyperliquid, about 20 MB a day (budget 100 MB), kept
+    path: perps_books
+    max_age_h: 1
+    max_gb: 15
+
 # Free data sources the health check watches (jobs.py checks, one "feed <name>" row each): the
 # status file the collector writes after every run, how old its last run and the newest value
 # of each of its tables may be (max_age), how many missing steps in the last 7 days are
@@ -1645,6 +1668,11 @@ feeds:
     status: book_depth/health.json
     max_age: 3d
     max_gaps: 30
+  - name: perps-books
+    job: perps-books
+    status: perps_books/health.json
+    max_age: 30m
+    max_gaps: 12
 
 # The state that cannot be rebuilt from market data. Paths are under the
 # data root. Archives go to dest (outside the data root) as

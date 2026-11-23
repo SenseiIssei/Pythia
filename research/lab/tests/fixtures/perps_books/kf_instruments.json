@@ -1,0 +1,46 @@
+{
+"result": "success",
+"instruments": [
+{
+"symbol": "PF_XBTUSD",
+"type": "flexible_futures",
+"base": "BTC",
+"quote": "USD",
+"tradeable": true,
+"suspended": false
+},
+{
+"symbol": "PF_ETHUSD",
+"type": "flexible_futures",
+"base": "ETH",
+"quote": "USD",
+"tradeable": true,
+"suspended": false
+},
+{
+"symbol": "PF_ADAUSD",
+"type": "flexible_futures",
+"base": "ADA",
+"quote": "USD",
+"tradeable": true,
+"suspended": true
+},
+{
+"symbol": "PF_SOLUSD",
+"type": "flexible_futures",
+"base": "SOL",
+"quote": "USD",
+"tradeable": true,
+"suspended": false
+},
+{
+"symbol": "PF_DOGEUSD",
+"type": "flexible_futures",
+"base": "DOGE",
+"quote": "USD",
+"tradeable": true,
+"suspended": false
+}
+],
+"serverTime": "2026-11-23T09:18:57.606Z"
+}
