@@ -361,3 +361,38 @@ def test_disk_line_from_the_fall_and_days_left(root):
     write(root, "_ops/disk/latest.json", disk)
     line = next(ln for ln in page_text(root).splitlines() if ln.startswith("Platte:"))
     assert "kein Volllaufen absehbar" in line and "wächst am meisten" not in line
+
+
+def test_days_without_a_run_are_missing_not_zero(root):
+    """m4_perps' audit: the job did not run from 2026-11-05 to 11-09, the dated reports kept printing its last run
+    (+7.82 % from 11-04 on); those reports are no point, and the next run's step covers all its days."""
+    start = datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp() * 1000
+    runs = list(range(0, 10)) + list(range(15, 20))           # no run on days 10 to 14, the reports go on
+    eq, v, rows = 1.0, {}, []
+    for i in range(20):
+        if i in runs:
+            eq *= 1.01 if i % 2 else 0.995
+            v[i] = (eq - 1) * 100
+        last = max(r for r in runs if r <= i)
+        day = weekly.day(int(start + i * DAY))
+        write(root, f"reports/forward/{day}.json", {"books": [
+            {"kind": "book", "name": "gappy", "since": "2026-10-01", "return_pct": v[last],
+             "last": weekly.day(int(start + last * DAY))}]})
+    pts = weekly.history(root, "forward/latest.json", "gappy", {})
+    assert [weekly.day(t) for t, _, _ in pts] == [weekly.day(int(start + i * DAY)) for i in runs]
+    steps = [(b[1] / a[1] - 1) / ((b[0] - a[0]) / DAY) for a, b in zip(pts, pts[1:])]
+    assert len(steps) == len(runs) - 1 and 0.0 not in steps
+    assert weekly.lower_monthly(pts) == pytest.approx(expected_lower(steps))
+
+
+def test_days_without_a_run_are_no_days_of_record(root):
+    """31 calendar days since the start but 28 days the book ran on (forward's `days`): under 30, no figure."""
+    forward_book(root, "steady", steady())
+    add_rows(root, ladder_row("steady", 1))
+    assert cap_line(page_text(root), "steady") is not None
+    lat = json.loads((root / "reports/forward/latest.json").read_text(encoding="utf-8"))
+    for b in lat["books"]:
+        b["days"] = 28 if b["name"] == "steady" else b.get("days")
+    write(root, "reports/forward/latest.json", lat)
+    t = page_text(root)
+    assert cap_line(t, "steady") is None and "unter 30 Tagen Aufzeichnung: steady" in t

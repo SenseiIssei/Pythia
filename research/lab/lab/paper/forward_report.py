@@ -122,6 +122,11 @@ FROZEN: dict[str, tuple[str, str]] = {
 }
 # picks_ls journals book the modelled cost (10 bps per unit of turnover) as their fill cost.
 MODELLED_ONLY = {"picks_ls": 0.0010, "picks_ls_v2": 0.0010}
+# Journal model costs booked at a rate that is not the band's, restated per row (the journal is never rewritten):
+# book -> (rate booked, the band's rate) per unit of turnover; a row is restated when its model cost is the turnover
+# at the booked rate. m4_perps booked m4_residual's 41 bps, its band (M4L) paid Kraken's 5 bps taker plus DT1's
+# proxy (results/m4_perps_forward_audit.md).
+MODEL_RESTATED = {"m4_perps": (0.0041, 0.00088)}
 PICKS_LS_ROW = "top 10 / bottom 10 of the 50 most liquid perps · no paying shorts"
 
 
@@ -394,6 +399,23 @@ def _rebalanced(r: dict) -> bool:
     return t is not None and t > 0.01
 
 
+def record_days(journal: list[dict]) -> int:
+    """Days of record: the dates the book ran on. A re-run on the same date is one day; a date without a run counts
+    nothing, its moves arrive with the next run (results/m4_perps_forward_audit.md)."""
+    return len({r.get("date") for r in journal if r.get("date")})
+
+
+def model_cost_bps(book: str, row: dict) -> float:
+    """The row's model cost in bps, restated at the band's rate when it was booked at another (MODEL_RESTATED)."""
+    m = _f(row, "model_cost_bps") or 0.0
+    if book in MODEL_RESTATED:
+        old, new = MODEL_RESTATED[book]
+        t = _f(row, "turnover") or 0.0
+        if t > 0 and abs(m - t * old * 1e4) <= 0.02:
+            return t * new * 1e4
+    return m
+
+
 def fresh_record(book: str, journal: list[dict]) -> tuple[list[dict], float, dict | None]:
     """The journal rows that count, the equity they start from, and the freeze note.
 
@@ -439,7 +461,7 @@ def book_row(book: str, journal: list[dict], variant: str = "") -> dict:
         cost_ratio = None
     else:
         paper_cost = sum(_f(r, "paper_cost_bps") or 0.0 for r in journal) / 100
-        model_cost = sum(_f(r, "model_cost_bps") or 0.0 for r in journal) / 100
+        model_cost = sum(model_cost_bps(book, r) for r in journal) / 100
         cost_ratio = paper_cost / model_cost if model_cost > 0.01 else None
     funding = None
     if "funding_pct" in journal[0]:
@@ -450,15 +472,16 @@ def book_row(book: str, journal: list[dict], variant: str = "") -> dict:
     exp = expectation(book, elapsed)
     pos = position(ret_pct, exp)
     dd_deeper = bool(exp and exp.get("dd_p95_pct") is not None and dd_pct > exp["dd_p95_pct"] and dd_pct > 0.5)
-    ready = len(journal) >= GATE_DAYS and rebalances >= GATE_TRADES
-    status, text = book_verdict(len(journal), elapsed, pos, dd_deeper, cost_ratio, ready, ret_pct)
+    days = record_days(journal)
+    ready = days >= GATE_DAYS and rebalances >= GATE_TRADES
+    status, text = book_verdict(days, elapsed, pos, dd_deeper, cost_ratio, ready, ret_pct)
     if frozen is not None:
         text = f"Fresh record since {frozen['through']} (the one before is frozen: {frozen['why']}). {text}"
     return {
         **base,
         "since": journal[0].get("date"),
         "last": journal[-1].get("date"),
-        "days": len(journal),
+        "days": days,
         "elapsed_days": elapsed,
         "return_pct": ret_pct,
         "max_dd_pct": dd_pct,
@@ -468,9 +491,9 @@ def book_row(book: str, journal: list[dict], variant: str = "") -> dict:
         "funding_pct": funding,
         "expected": exp,
         "position": pos,
-        "gate7": {"days": len(journal), "days_needed": GATE_DAYS, "trades": rebalances,
+        "gate7": {"days": days, "days_needed": GATE_DAYS, "trades": rebalances,
                   "trades_needed": GATE_TRADES, "trades_label": "rebalances",
-                  "progress": min(len(journal) / GATE_DAYS, rebalances / GATE_TRADES, 1.0), "ready": ready},
+                  "progress": min(days / GATE_DAYS, rebalances / GATE_TRADES, 1.0), "ready": ready},
         "status": status,
         "sentence": text,
     }

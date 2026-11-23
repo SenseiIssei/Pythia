@@ -144,14 +144,15 @@ def book_rows(root: Path, now: int, sol_eur: float | None) -> list[dict]:
 
 # ---------------------------------------------------------------- W2: the capital line
 
-def _hist_point(d: dict, name: str) -> tuple[float, float, str] | None:
-    """(value, paid in, start) of a book in one dated report: forward's books list (1 + return since start), the
-    small-account and ETF books (equity_eur; paid_eur or capital_eur), the on-chain book (equity_usdc, start_usdc)."""
+def _hist_point(d: dict, name: str) -> tuple[float, float, str, str] | None:
+    """(value, paid in, start, last run) of a book in one dated report: forward's books list (1 + return since start,
+    its journal's last date), the small-account and ETF books (equity_eur; paid_eur or capital_eur), the on-chain
+    book (equity_usdc, start_usdc); last run "" where the report has none."""
     bs = d.get("books")
     if isinstance(bs, list):
         b = next((x for x in bs if isinstance(x, dict) and x.get("name") == name), None)
         v = _n((b or {}).get("return_pct"))
-        return (1 + v / 100, 0.0, str(b.get("since"))) if v is not None else None
+        return (1 + v / 100, 0.0, str(b.get("since")), str(b.get("last") or "")) if v is not None else None
     b = bs.get(name) if isinstance(bs, dict) else (d if (d.get("book") or "onchain_longterm") == name else None)
     if not isinstance(b, dict):
         return None
@@ -162,12 +163,14 @@ def _hist_point(d: dict, name: str) -> tuple[float, float, str] | None:
             return None
     v = f("equity_eur") if f("equity_eur") is not None else f("equity_usdc")
     paid = next((x for x in (f("paid_eur"), f("capital_eur"), f("start_usdc")) if x is not None), 0.0)
-    return (v, paid, str(b.get("started") or b.get("since") or "")) if v is not None else None
+    return (v, paid, str(b.get("started") or b.get("since") or ""), "") if v is not None else None
 
 
 def history(root: Path, report: str, name: str, cache: dict) -> list[tuple[int, float, float]]:
     """[(day_ms, value, paid)] of a book from the dated reports next to its report (reports/<folder>/<date>.json),
-    only the points since its current start."""
+    only the points since its current start. A report whose book did not run since the one before (the same last
+    run) is no point: the days without a run are missing, not days of zero return, and their moves arrive with the
+    next run's step over all its days (results/m4_perps_forward_audit.md)."""
     folder = (root / "reports" / report).parent
     if folder not in cache:
         cache[folder] = [(p.stem, notify.read_json(p)) for p in sorted(folder.glob("????-??-??.json"))] \
@@ -179,7 +182,13 @@ def history(root: Path, report: str, name: str, cache: dict) -> list[tuple[int, 
         if pt and t is not None:
             pts.append((t, *pt))
     start = pts[-1][3] if pts else None
-    return [(t, v, paid) for t, v, paid, st in pts if st == start]
+    out, seen = [], None
+    for t, v, paid, st, last in pts:
+        if st != start or (last and last == seen):
+            continue
+        out.append((t, v, paid))
+        seen = last or None
+    return out
 
 
 def lower_monthly(pts: list[tuple[int, float, float]]) -> float | None:
@@ -210,6 +219,15 @@ def fill_gap(fwd: dict, name: str) -> tuple[float, float] | None:
     return ratio, model / 100 * MONTH_DAYS / days * (ratio - 1)
 
 
+def record_days(b: dict, fwd: dict) -> float:
+    """A book's days of record: its days since its start, and for a forward book at most the days it ran on
+    (forward's `days`): a day without a run is no day of record (results/m4_perps_forward_audit.md)."""
+    days = b.get("days") or 0
+    fb = next((x for x in fwd.get("books") or [] if isinstance(x, dict) and x.get("name") == b.get("name")), None)
+    ran = _n((fb or {}).get("days"))
+    return min(days, ran) if ran is not None else days
+
+
 def capital(r: dict, b: dict | None, pf: dict, fwd: dict, hist) -> dict:
     """One ladder candidate under W2: {"kind": "unknown" | "short" | "none" | "unreachable" | "cap", ...}."""
     p3 = (b or {}).get("p3")
@@ -236,8 +254,9 @@ def capital(r: dict, b: dict | None, pf: dict, fwd: dict, hist) -> dict:
                 "stake_sol": stake / pf["sol_eur"], "days": days}
     if b is None or b.get("currency") == "SOL":                              # no book, or R2's without a band
         return {"kind": "unknown"}
-    if (b.get("days") or 0) < MIN_RECORD_DAYS:
-        return {"kind": "short", "days": b.get("days") or 0}
+    days = record_days(b, fwd)
+    if days < MIN_RECORD_DAYS:
+        return {"kind": "short", "days": days}
     m = lower_monthly(hist(b["report"], b["name"]))
     if m is None:
         return {"kind": "unknown"}
@@ -246,7 +265,7 @@ def capital(r: dict, b: dict | None, pf: dict, fwd: dict, hist) -> dict:
         m -= gap[1]
     if m <= 0:
         return {"kind": "none"}
-    return {"kind": "cap", "eur": GOAL_EUR / m, "m": m, "gap": gap[0] if gap else None, "days": b["days"]}
+    return {"kind": "cap", "eur": GOAL_EUR / m, "m": m, "gap": gap[0] if gap else None, "days": days}
 
 
 # ---------------------------------------------------------------- the page

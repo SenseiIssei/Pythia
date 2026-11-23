@@ -72,7 +72,12 @@ CONFIG = {
 VARIANT = (f"{LABEL} · M4 reg7n · 10/10 of the 100 most liquid perps listed on Kraken Futures · "
            "rank buffer 50 %")
 START_EQUITY = 10_000.0
-MODEL_COST = xs.COSTS["41bps"]      # the cost the evidence below is quoted at
+# The journal's model cost: what the band's backtest (M4L's series, results/m4l.md) paid per unit traded, Kraken
+# Futures' 5 bps taker (DT1's FEE_KF) plus DT1's spread proxy, 3.77 bps per USD traded on Kraken's coins
+# (m4l_series.json). It booked the 41 bps the evidence below is quoted at until the forward audit
+# (results/m4_perps_forward_audit.md): the cost ratio read 0.15 against a band that assumed 8.8 bps.
+MODEL_SLIP = 3.8e-4
+MODEL_COST = 5e-4 + MODEL_SLIP
 SIGNAL_VALID_MS = 36 * 3600 * 1000
 DAY_US = xs.DAY_US
 DIR = WRITE_ROOT / "paper" / NAME
