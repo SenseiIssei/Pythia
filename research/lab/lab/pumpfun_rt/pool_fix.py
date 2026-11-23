@@ -36,6 +36,7 @@ PREREG = "results/pumpfun_pool_state_fix_prereg.md"
 RESULTS = Path(__file__).resolve().parents[2] / "results"
 OUT = RESULTS / "pumpfun_pool_state_fix.md"
 KEYS = RESULTS / "pumpfun_pool_state_fix_rows.json"     # realistic.STALE_KEYS
+WINDOW = RESULTS / "pumpfun_realistic_fit_window.md"    # 12041's sensitivity, both runs with the fix
 WINDOW_FROM_MS = int(datetime(2026, 10, 24, 1, 43, tzinfo=timezone.utc).timestamp() * 1000)   # ladder.PF_REAL_FROM_MS
 UNTIL_DAY = "2026-11-15"                                  # the last full UTC day at the run
 DAY_MS = 86_400_000
@@ -265,9 +266,51 @@ def markdown(res: dict) -> str:
         x = st["books"].get(name)
         if x:
             md.append(f"| {name} | {x['rows']} | {x['stale']} | {x['stale_sol']:+.4f} |")
+    md += sens_lines(res.get("sens") or {})
     md += ["", "## What P3's gate and the ladder read now", ""]
     md += res.get("now") or ["n/a"]
     return "\n".join(md) + "\n"
+
+
+def sensitivity(cmp_: dict, path: Path = WINDOW) -> dict:
+    """12041's sensitivity (results/pumpfun_realistic_fit_window.md: the fallback against the new fit, both with
+    fresh_pool on) against this study's runs on the run day's fit: what of its points stands over its fallback after
+    the fix (after less its fallback) and what the engine before the fix gives (before less its fallback)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out = {}
+    for line in text.splitlines():
+        c = [x.strip() for x in line.strip().strip("|").split("|")]
+        if len(c) == 8 and c[0] in cmp_ and c[2].endswith("%") and c[5].endswith("%"):
+            fb, new, pts = float(c[2].rstrip(" %")), float(c[5].rstrip(" %")), float(c[7])
+            x = cmp_[c[0]]
+            a = None if x["after"]["mean"] is None else x["after"]["mean"] * 100
+            b = None if x["before"]["mean"] is None else x["before"]["mean"] * 100
+            out[c[0]] = {"fallback": fb, "new": new, "pts": pts, "after": a, "before": b,
+                         "after_pts": None if a is None else a - fb, "before_pts": None if b is None else b - fb,
+                         "share": None if a is None or not pts else (a - fb) / pts}
+    return out
+
+
+def sens_lines(sens: dict) -> list[str]:
+    if not sens:
+        return []
+    md = ["", "## 12041's sensitivity", "",
+          f"`{WINDOW.name}` (12041): the fallback against the new fit, both runs with `fresh_pool` on. Against its "
+          f"fallback mean: this study's after run (the fix on, the run day's fit) and before run (the fix off). "
+          f"Survives: after less its fallback, as a share of its points.", "",
+          "| book | 12041 fallback | 12041 new fit | 12041 points | after | after less fallback | before | "
+          "before less fallback | survives |", "|---|---|---|---|---|---|---|---|---|"]
+
+    def f(v, unit=""):
+        return "n/a" if v is None else f"{v:+.1f}{unit}"
+    for name, x in sens.items():
+        md.append(f"| {name} | {f(x['fallback'], ' %')} | {f(x['new'], ' %')} | {f(x['pts'])} | "
+                  f"{f(x['after'], ' %')} | {f(x['after_pts'])} | {f(x['before'], ' %')} | {f(x['before_pts'])} | "
+                  f"{'n/a' if x['share'] is None else format(x['share'] * 100, '.0f') + ' %'} |")
+    return md
 
 
 def now_lines(ledger_dir: Path | None = None, data_root: Path | None = None) -> list[str]:
@@ -335,8 +378,9 @@ def main(argv: list[str] | None = None) -> int:
     st = ledger_stale(R.read_csv(paper_dir() / "ledger.csv"), root)
     write_keys(st, Path(a.keys))
     R.STALE_KEYS = None                                      # read the keys just written
-    res = {"books": compare(before, after), "ledger": st, "before_run": before, "after_run": after,
-           "now": now_lines()}
+    cmp_ = compare(before, after)
+    res = {"books": cmp_, "ledger": st, "before_run": before, "after_run": after, "now": now_lines(),
+           "sens": sensitivity(cmp_)}
     Path(a.out).write_text(markdown(res), encoding="utf-8")
     print(f"pool_fix: {len(st['keys'])} stale ledger rows -> {a.keys}; report -> {a.out}")
     return 0

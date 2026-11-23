@@ -45,7 +45,7 @@ def test_hexn_a_read_of_a_later_slot_is_the_state_and_the_fill():
 
 def test_without_the_flag_the_engine_is_unchanged():
     eng, tok = hexn(False)
-    assert tok.pq < QUOTE0 * 1.01 and tok.amm_slot == 50_001   # the trade's state, the read dropped (G1's xfail)
+    assert tok.pq < QUOTE0 * 1.01 and tok.amm_slot == 50_001   # the trade's state, the read dropped (G1 pins it too)
     p = next(iter(eng.pipes[0].pos.values()))
     assert p["entry_price"] < C.price(PQ, PB) / 1.09
 
@@ -224,6 +224,22 @@ def test_the_books_the_trials_and_the_report():
     md = F.markdown(res)
     assert "| P_pool0 | 1 | +10.0 % | n/a | 1 | +30.0 % | n/a | +20.0 | 1 of 1 (100.0 %) | 0 / 0 |" in md
     assert "| P_pool0 | 3 | 1 | +0.0100 |" in md and EM not in md
+
+
+def test_12041s_sensitivity_against_the_runs(tmp_path):
+    w = tmp_path / "window.md"
+    w.write_text("| book | entries, fallback | mean, fallback | band, fallback | entries, new fit | mean, new fit | "
+                 "band, new fit | points |\n|---|---|---|---|---|---|---|---|\n"
+                 "| P_pool0 | 2573 | +1.9 % | -0.1 % to +3.8 % | 2651 | +6.1 % | +3.8 % to +8.5 % | +4.3 |\n",
+                 encoding="utf-8")
+    t = F.WINDOW_FROM_MS
+    c = F.compare({"books": {"P_pool0": [ent("a", t + 1, 0.081)]}}, {"books": {"P_pool0": [ent("a", t + 1, 0.04)]}})
+    s = F.sensitivity(c, w)
+    assert list(s) == ["P_pool0"] and s["P_pool0"]["after_pts"] == pytest.approx(2.1)
+    assert s["P_pool0"]["before_pts"] == pytest.approx(6.2) and s["P_pool0"]["share"] == pytest.approx(2.1 / 4.3)
+    md = "\n".join(F.sens_lines(s))
+    assert "| P_pool0 | +1.9 % | +6.1 % | +4.3 | +4.0 % | +2.1 | +8.1 % | +6.2 | 49 % |" in md and EM not in md
+    assert F.sensitivity(c, tmp_path / "none.md") == {} and F.sens_lines({}) == []
 
 
 def test_what_p3_and_the_ladder_read_now(tmp_path, monkeypatch):

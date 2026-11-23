@@ -1,7 +1,8 @@
 """G1 (results/pumpfun_gap_reconcile_g1_prereg.md): paper minus twin split exactly into its parts, the three records
 of a trade, the sample's reasons, P2's eras and the stale pool state check; and the engine's drop of a fresher pool
 read the study found (HEXN 2026-10-29: the paper filled 34 s after the migration on the first pool trade's state,
-three times under the pool's read), kept as a strict xfail until sim.Engine.pool_state takes a read of a later slot.
+three times under the pool's read), a normal test since the pool state fix (sim.Engine(fresh_pool=True), the paper
+books' flag; the default, what the live service and the twin run, still drops it).
 
 Run from research/lab:  python -m pytest tests/test_pumpfun_gap_reconcile_g1.py
 """
@@ -140,12 +141,11 @@ def test_the_trials_are_counted_in_the_pumpfun_family():
     assert G.CUT_MS == R.FIX_MS
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="G1: sim.Engine.pool_state drops a pool read once the stream gave a pool "
-                                       "trade, even a read of a later slot (outside this study's files)")
 def test_a_pool_read_of_a_later_slot_than_the_streams_last_trade_is_the_state():
-    eng = engine("P_pool0")
-    pool = LatePool(eng)
-    pool.open(T0 + 100)                                    # the stream's one trade, slot 50_001
-    eng.pool_state(T0 + 200, MINT, POOL, BASE0 // 2, QUOTE0 * 2, slot=50_081)
-    tok = eng.tokens[MINT]
-    assert (tok.pb, tok.pq) == (BASE0 // 2, QUOTE0 * 2)
+    for fresh in (True, False):                            # the paper books' flag; the default unchanged
+        eng = engine("P_pool0", fresh_pool=fresh)
+        pool = LatePool(eng)
+        pool.open(T0 + 100)                                # the stream's one trade, slot 50_001
+        eng.pool_state(T0 + 200, MINT, POOL, BASE0 // 2, QUOTE0 * 2, slot=50_081)
+        tok = eng.tokens[MINT]
+        assert ((tok.pb, tok.pq) == (BASE0 // 2, QUOTE0 * 2)) is fresh
