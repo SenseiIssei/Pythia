@@ -325,6 +325,19 @@ def test_the_night_skips_the_held_back_replay_rather_than_run_into_the_jobs_limi
     assert F.last_slow(tmp_path / "f") == 1.0
 
 
+def test_a_night_with_0_trials_adds_no_ledger_line_and_still_writes_the_report(tmp_path, monkeypatch):
+    from lab.pumpfun_rt import live
+    rps = []
+    monkeypatch.setattr(F, "Days", lambda now_ms, root=None, held=(): FakeDays())
+    monkeypatch.setattr(F, "Replayer", lambda days, model, root=None, log=print: rps.append(SlowRp()) or rps[-1])
+    monkeypatch.setattr(R, "_measured", lambda: [])
+    monkeypatch.setattr(R, "sol_eur", lambda: 90.0)
+    monkeypatch.setattr(live, "paper_dir", lambda: tmp_path)
+    s = F.run(now_ms=T0, trials=0, model_trials=0, d=tmp_path / "f", out=tmp_path / "out", log=lambda *a: None)
+    assert s["trials_tonight"] == 0 and not s["holdback"] and rps[0].runs == []     # no replay at all
+    assert F.read_ledger(tmp_path / "f" / "ledger.jsonl") == [] and (tmp_path / "out" / "factory.md").exists()
+
+
 def test_a_winner_needs_the_bar_and_the_held_back_days(monkeypatch):
     r = {"id": "F3_00001", "entries": 400, "sharpe": 0.3, "skew": 0.0, "kurt": 3.0, "median": 0.8, "score": 0.8,
          "days": [f"d{i}" for i in range(10)]}
@@ -506,7 +519,7 @@ def test_the_job_runs_nightly_under_the_heavy_lock():
     j = jobs.load_table(REPO_TABLE).jobs["pumpfun-factory"]
     assert j["schedule"] == "0 1 * * *" and j["command"] == "python -m lab.pumpfun_rt.factory"
     assert j["timeout_s"] <= 2.5 * 3600 and "heavy" in j["locks"] and j["resources"]["cpus"] == 3
-    assert j["env"]["PYTHIA_PF_FACTORY_TRIALS"] == "300"
+    assert j["env"]["PYTHIA_PF_FACTORY_TRIALS"] == "0"                   # the search pause
     from pathlib import Path
     assert "optuna" in (Path(__file__).resolve().parents[1] / "requirements.txt").read_text()
 

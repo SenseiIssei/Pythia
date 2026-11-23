@@ -1,0 +1,220 @@
+{
+ "judged": "2026-11-23",
+ "window": [
+  "2026-10-12",
+  "2026-11-22"
+ ],
+ "rate_from": "2026-10-26",
+ "weeks_ahead": 8,
+ "today": {
+  "r5_trials": 7400,
+  "f3_trials": 1233,
+  "b_day": 3.077004669679481,
+  "b_entry": 0.9128016176915483,
+  "n_entry": 8633
+ },
+ "jobs": [
+  {
+   "job": "factory-weekly",
+   "key": "weekly",
+   "label": "strategy factory W10/G1 (weekly)",
+   "trials_total": 2391,
+   "r5_trials": 2391,
+   "weeks": {
+    "2026-10-12": 600,
+    "2026-10-19": 300,
+    "2026-10-26": 298,
+    "2026-11-02": 300,
+    "2026-11-09": 297,
+    "2026-11-16": 296
+   },
+   "per_week": 297.75,
+   "window_trials": 2091,
+   "steps": {
+    "0": 4,
+    "1": 8,
+    "2": 0,
+    "3": 0,
+    "4": 0,
+    "5": 0,
+    "6": 0
+   },
+   "candidates": {
+    "weekly:1aa46b2042a8": 1,
+    "weekly:50af2b9ddd09": 1,
+    "weekly:734547b6890a": 1,
+    "weekly:7f71dc8eb814": 1,
+    "weekly:af8e140082fa": 1,
+    "weekly:e0805d34fe2a": 1,
+    "weekly:e43262b00180": 1,
+    "weekly:f816878de7f6": 1,
+    "weekly:19304de6ab44": 0,
+    "weekly:38c0885daa3c": 0,
+    "weekly:44444c97ba5e": 0,
+    "weekly:819cd2b77872": 0
+   },
+   "verdict": "pause",
+   "flag": "command --budget 0",
+   "before": "300 (search.BUDGET)",
+   "runs": 6,
+   "run_h": 0.8952777777777777,
+   "lock_h": 0.5105555555555555,
+   "cpu_h": 2.042222222222222,
+   "cpus": 4.0,
+   "b_day": 3.077004669679481,
+   "b_day_without": 3.154614043508845,
+   "b_day_n_only": 2.997171482339283,
+   "b_entry": 0.9128016176915483,
+   "b_entry_without": 0.893534201097178
+  },
+  {
+   "job": "factory-small",
+   "key": "f2",
+   "label": "F2 small account (daily)",
+   "trials_total": 1451,
+   "r5_trials": 1451,
+   "weeks": {
+    "2026-10-12": 0,
+    "2026-10-19": 0,
+    "2026-10-26": 379,
+    "2026-11-02": 342,
+    "2026-11-09": 357,
+    "2026-11-16": 327
+   },
+   "per_week": 351.25,
+   "window_trials": 1405,
+   "steps": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0,
+    "5": 0,
+    "6": 0
+   },
+   "candidates": {},
+   "verdict": "pause",
+   "flag": "PYTHIA_FACTORY_SMALL_BUDGET 0",
+   "before": "60",
+   "runs": 27,
+   "run_h": 2.1547222222222224,
+   "lock_h": 0.5805555555555556,
+   "cpu_h": 0.5805555555555556,
+   "cpus": 1.0,
+   "b_day": 3.077004669679481,
+   "b_day_without": 3.2207701011328,
+   "b_day_n_only": 3.0325868738069213,
+   "b_entry": 0.9128016176915483,
+   "b_entry_without": 0.9019138863411701
+  },
+  {
+   "job": "pumpfun-factory",
+   "key": "f3",
+   "label": "pump.fun factory F3 (nightly)",
+   "trials_total": 1233,
+   "r5_trials": 0,
+   "weeks": {
+    "2026-10-12": 0,
+    "2026-10-19": 0,
+    "2026-10-26": 750,
+    "2026-11-02": 234,
+    "2026-11-09": 84,
+    "2026-11-16": 140
+   },
+   "per_week": 302.0,
+   "window_trials": 1208,
+   "steps": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0,
+    "5": 0,
+    "6": 0
+   },
+   "candidates": {},
+   "verdict": "pause",
+   "flag": "PYTHIA_PF_FACTORY_TRIALS 0",
+   "before": "300",
+   "runs": 27,
+   "run_h": 44.47527777777778,
+   "lock_h": 44.19444444444444,
+   "cpu_h": 132.58333333333331,
+   "cpus": 3.0,
+   "b_day": 3.077004669679481,
+   "b_day_without": 3.077004669679481,
+   "b_day_n_only": 3.077004669679481,
+   "b_entry": 0.9128016176915483,
+   "b_entry_without": 0.9036911334232236
+  },
+  {
+   "job": "model-factory",
+   "key": "g2",
+   "label": "model factory G2 (daily)",
+   "trials_total": 61622,
+   "r5_trials": 0,
+   "weeks": {
+    "2026-10-12": 0,
+    "2026-10-19": 0,
+    "2026-10-26": 16025,
+    "2026-11-02": 15046,
+    "2026-11-09": 15313,
+    "2026-11-16": 15238
+   },
+   "per_week": 15405.5,
+   "window_trials": 61622,
+   "steps": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0,
+    "5": 0,
+    "6": 0
+   },
+   "candidates": {},
+   "verdict": "pause",
+   "flag": "PYTHIA_MODEL_FACTORY_BUDGET 0",
+   "before": "1500",
+   "runs": 25,
+   "run_h": 10.587777777777777,
+   "lock_h": 10.206388888888888,
+   "cpu_h": 30.619166666666665,
+   "cpus": 3.0,
+   "b_day": 3.077004669679481,
+   "b_day_without": 3.077004669679481,
+   "b_day_n_only": 3.077004669679481,
+   "b_entry": 0.9128016176915483,
+   "b_entry_without": 0.9128016176915483,
+   "g2_bar_p": 8.113985265002759e-07,
+   "g2_bar_p_start": null
+  }
+ ],
+ "projection": {
+  "without_pause": {
+   "r5_trials": 12592,
+   "f3_trials": 3649,
+   "b_day": 2.9491893756816374,
+   "b_day_n_only": 3.182854766976898,
+   "b_entry": 0.9493353081846879,
+   "g2_trials": 184866,
+   "g2_bar_p": 2.7046617550009197e-07
+  },
+  "with_pause": {
+   "r5_trials": 7400,
+   "f3_trials": 1233,
+   "b_day": 3.077004669679481,
+   "b_day_n_only": 3.077004669679481,
+   "b_entry": 0.9128016176915483,
+   "g2_trials": 61622,
+   "g2_bar_p": 8.113985265002759e-07
+  }
+ },
+ "trials": [
+  "hand:search_pause:weekly",
+  "hand:search_pause:f2",
+  "hand:search_pause:f3",
+  "hand:search_pause:g2",
+  "hand:search_pause:projection"
+ ]
+}

@@ -285,6 +285,16 @@ def test_run_is_resumable_and_writes_the_report(ctx, dirs):
     assert "\u2014" not in md
 
 
+def test_a_budget_of_0_adds_no_genome_and_still_reviews(ctx, dirs):
+    v = make_venue()
+    d = _run(ctx, v, 8, "2026-10-26")
+    n = len(small.Ledger())
+    paused = _run(ctx, v, 0, "2026-10-27")                   # the search pause (results/search_pause_prereg.md)
+    assert len(small.Ledger()) == n and paused["search"]["evaluated"] == 0
+    assert paused["pool_after"]["n_trials"] == d["pool_after"]["n_trials"]
+    assert "holdout" in paused and paused["verdict"]
+
+
 def test_shadow_wallets_start_step_forward_and_retire(dirs, monkeypatch):
     v = make_venue()
     days, crypto, etf = synthetic(T=3403)
@@ -331,5 +341,5 @@ def test_the_job_runs_daily_at_three_under_the_heavy_lock():
     t = jobs.load_table(Path(__file__).resolve().parents[2] / "ops" / "jobs.yaml")
     j = t.jobs["factory-small"]
     assert j["schedule"] == "0 3 * * *" and j["command"] == "python -m lab.factory small"
-    assert "heavy" in j["locks"] and j["env"]["PYTHIA_FACTORY_SMALL_BUDGET"] == "60"
+    assert "heavy" in j["locks"] and j["env"]["PYTHIA_FACTORY_SMALL_BUDGET"] == "0"     # the search pause
     assert j["env"]["PYTHIA_AGENT_OUT"] == "/data/lab-cache"

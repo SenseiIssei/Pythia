@@ -318,7 +318,7 @@ def test_the_job_runs_daily_after_three_under_the_heavy_lock():
     minute, hour = j["schedule"].split()[:2]
     assert j["schedule"].endswith("* * *") and int(hour) >= 3 and j["enabled"]
     assert j["command"] == "python -m lab.models.factory" and "heavy" in j["lock"]
-    assert int(j["env"]["PYTHIA_MODEL_FACTORY_BUDGET"]) > 0
+    assert j["env"]["PYTHIA_MODEL_FACTORY_BUDGET"] == "0"                # the search pause: no new specs
     others = {x["schedule"] for n, x in t.jobs.items() if n != "model-factory" and x.get("schedule")}
     assert j["schedule"] not in others
 

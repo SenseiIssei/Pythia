@@ -284,6 +284,18 @@ def test_weekly_run_end_to_end(home, monkeypatch):
     assert "## Held back: what survived and why" in md
 
 
+def test_a_weekly_run_with_budget_0_adds_no_genome_and_still_checks_what_it_holds(home, monkeypatch):
+    P = synthetic_panel()
+    monkeypatch.setattr(history, "load_long_panel", lambda fetch=False, fresh=False: P)
+    d1 = run.weekly(40, False, "2026-10-17", log=lambda *_: None)
+    d2 = run.weekly(0, False, "2026-10-24", log=lambda *_: None)    # the search pause (results/search_pause_prereg.md)
+    assert len(ledger.Ledger()) == 40 and d2["search"]["evaluated"] == 0
+    assert d2["pool_after"]["n_trials"] == d1["pool_after"]["n_trials"]
+    assert not {h["key"] for h in d1["holdout"] if h["decision"] != "waiting"} & {h["key"] for h in d2["holdout"]}
+    run.publish(d2)
+    assert "Factory 2026-10-24" in run.writeup.digest(d2)
+
+
 def test_shadow_days_are_frozen_and_reviewed_after_a_month(home, ctx):
     g = grammar.random_genome(random.Random(12))
     r = evaluate.in_sample(ctx, g, "run")

@@ -776,7 +776,7 @@ jobs:
   - name: factory-weekly
     description: strategy factory, weekly search, held-back checks and digest; every trial in the ledger
     schedule: "30 7 * * 0"
-    command: python -m lab.factory --notify
+    command: python -m lab.factory --notify --budget 0
     env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     env: {PYTHIA_AGENT_OUT: /data/lab-cache}
     resources: {cpus: 4, memory: 4g}
@@ -786,6 +786,11 @@ jobs:
     replaces: pythia-factory
     # The owner switched it back on 2026-10-21 after the research director had
     # advised a pause: every run raises the trial pool and the noise bar.
+    # Search pause (2026-11-23, research/lab/results/search_pause.md, rule in search_pause_prereg.md): no
+    # candidate of its own on the ladder's step 2 in the 6 weeks to 2026-11-22, so no new trials (--budget 0;
+    # before 300). The rest of the run stays: held-back looks at genomes already in the ledger, the lockbox step,
+    # the shadows' update and review, the digest. Restart: a candidate of its own on step 2 (the flag back) or the
+    # owner's word.
 
   # F2 (research/lab/lab/factory/small.py): the factory's small-account mode, daily. Genomes on BTC, ETH, SOL, SPYx,
   # QQQx and PAXG with USDC as cash (at most 3 held), each a wallet at 40 and 100 EUR with S1's and S2's costs
@@ -793,11 +798,16 @@ jobs:
   # factory/small/ledger.jsonl and bar; survivors (drawdown under 20 %, above holding SPYx held back) as 40 EUR shadow
   # wallets, at most 4; reports/smallaccount/factory.md. Reads the panel cache paper-families wrote the day before
   # and Yahoo's ETF closes. Resumable: a rerun the same day only evaluates what is left of the budget. Paper only.
+  # Search pause (2026-11-23, research/lab/results/search_pause.md, rule in search_pause_prereg.md): no candidate of
+  # its own on the ladder's step 2 in the 6 weeks to 2026-11-22, so no new trials (PYTHIA_FACTORY_SMALL_BUDGET 0;
+  # before 60). The rest of the run stays: held-back looks at genomes already in its ledger, the 40 EUR shadow
+  # wallets stepped and reviewed, the report. Restart: a candidate of its own on step 2 (the flag back) or the
+  # owner's word.
   - name: factory-small
     description: strategy factory F2, small-account mode, daily; new genomes for 40 and 100 EUR wallets at Jupiter's real costs, held-back checks against holding SPYx and BTC, 40 EUR shadow wallets, reports/smallaccount/factory.md
     schedule: "0 3 * * *"
     command: python -m lab.factory small
-    env: {PYTHIA_AGENT_OUT: /data/lab-cache, PYTHIA_FACTORY_SMALL_BUDGET: "60"}
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache, PYTHIA_FACTORY_SMALL_BUDGET: "0"}
     resources: {cpus: 1, memory: 2g}
     timeout: 30m
     lock: heavy
@@ -811,11 +821,15 @@ jobs:
   # behind. Time budget PYTHIA_MODEL_FACTORY_BUDGET (seconds), resumable; reports/models/factory.md. Paper only.
   # 10:00, not 03:50 (2026-10-29): its ~1,500 s held the heavy lock into 04:15, so the morning paper books (04:00 to
   # 06:15) queued behind it; at 10:00 the night's heavy jobs and the paper books are done.
+  # Search pause (2026-11-23, research/lab/results/search_pause.md, rule in search_pause_prereg.md): no candidate of
+  # its own on the ladder's step 2 in the 6 weeks to 2026-11-22, so no new trials (PYTHIA_MODEL_FACTORY_BUDGET 0;
+  # before 1500). The rest of the run stays: the shadow step, held-back looks at specs already screened, admissions,
+  # the report. Restart: a candidate of its own on step 2 (the flag back) or the owner's word.
   - name: model-factory
     description: model factory G2, daily; new model specs on the zoo's targets through a purged walk-forward against the baseline and the incumbent, held-back checks over all trials, shadows next to the zoo, reports/models/factory.md
     schedule: "0 10 * * *"
     command: python -m lab.models.factory
-    env: {PYTHIA_MODEL_FACTORY_BUDGET: "1500", PYTHIA_ML_THREADS: "3"}
+    env: {PYTHIA_MODEL_FACTORY_BUDGET: "0", PYTHIA_ML_THREADS: "3"}
     resources: {cpus: 3, memory: 6g}
     timeout: 1h
     lock: heavy
@@ -1190,11 +1204,16 @@ jobs:
   # held-back replay was killed at 9,000 s (exit 124, 11-02 and 11-03, heavy held to 03:30). Now at most 25 trials a
   # replay, the search ends early enough for the held-back replay's reserve (230 s a day), and that replay is skipped
   # rather than cut off; done near 03:10 on 14 recorded days. The 300 trials are a ceiling, not a night's count.
+  # Search pause (2026-11-23, research/lab/results/search_pause.md, rule in search_pause_prereg.md): no candidate of
+  # its own on the ladder's step 2 in the 6 weeks to 2026-11-22, so no new trials (PYTHIA_PF_FACTORY_TRIALS 0;
+  # before 300). The rest of the run stays: the factory paper books' night step, the LightGBM settings search for
+  # the retrain (no bar counts it), the report. Restart: a candidate of its own on step 2 (the flag back) or the
+  # owner's word.
   - name: pumpfun-factory
     description: pump.fun factory F3, PAPER, nightly; Optuna strategy search on realistic execution with a small wallet, LightGBM settings of the R2 labels, the factory paper books, reports/pumpfun_rt/factory.md
     schedule: "0 1 * * *"
     command: python -m lab.pumpfun_rt.factory
-    env: {PYTHIA_PF_FACTORY_TRIALS: "300"}
+    env: {PYTHIA_PF_FACTORY_TRIALS: "0"}
     resources: {cpus: 3, memory: 8g}
     timeout: 150m
     lock: heavy
