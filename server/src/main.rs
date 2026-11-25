@@ -1905,6 +1905,8 @@ async fn main() {
     }
     // What happened since the last minute's checkpoint is saved too.
     save_state(&state);
+    // Not a return: the runtime would wait for a long validation run first.
+    std::process::exit(0);
 }
 
 /// Ctrl+C, or the SIGTERM of `docker stop` and systemd.

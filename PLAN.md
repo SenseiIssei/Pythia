@@ -222,7 +222,7 @@ the research; nothing here promises a profit.
 
 Better than most: every study is registered before its first run and every trial is counted for good,
 paper is the default and real money needs several separate steps, one engine runs in the desktop app,
-on a server and behind a CLI, and the desktop installer is under 4 MB.
+on a server and behind a CLI, and the desktop installer is under 5 MB.
 
 Weaker than most, found in the audit of 2026-11-25:
 
