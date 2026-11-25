@@ -8,7 +8,7 @@
 //!   GET  /api/state            → current EngineState (JSON, camelCase)
 //!   GET  /api/stream           → WebSocket: full EngineState pushed every tick
 //!   POST /api/command          → mutate the engine (see `Command`)
-//!   POST /api/claude/signal    → ask Claude for a structured signal (env-gated)
+//!   POST /api/llm/signal       → ask a model for a structured signal (needs a key)
 //!   GET  /api/alerts           → operator alerts: destination, mute, counts, recent posts
 //!   POST /api/alerts/test      → send one test message (409 when alerts are off)
 //!   POST /api/alerts/mute      → mute for `{minutes}` (0 unmutes, at most 7 days)
@@ -23,9 +23,9 @@
 //!   GET  /api/readiness/settings → the real money readiness check's risk step
 //!   POST /api/readiness/settings → change it (`{riskStep}`, 1 to 5); report only
 //!
-//! Paper-first, exactly like the desktop app: real money stays gated behind the
-//! same sovereign risk manager and vault. This process only ever runs the
-//! simulated matching engine.
+//! Paper-first, exactly like the desktop app: without keys everything is
+//! simulated, and real orders need the server's keys, live routing armed, and
+//! the same risk manager in front of every entry (SAFETY.md).
 //!
 //! The API has no login of its own. It listens on 127.0.0.1 unless
 //! `PYTHIA_BIND` says otherwise, refuses state-changing requests from foreign
@@ -444,13 +444,19 @@ fn state_file() -> Option<std::path::PathBuf> {
 
 /// Checkpoints the engine every minute (atomic replace), like the desktop app.
 async fn save_loop(state: AppState) {
-    let Some(path) = state_file() else { return };
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
-        let snapshot = state.engine.lock().unwrap().to_persisted();
-        if let Err(e) = pythia_core::persist::save(&path, &snapshot) {
-            tracing::warn!("state not saved to {}: {e}", path.display());
-        }
+        save_state(&state);
+    }
+}
+
+/// One checkpoint to `PYTHIA_STATE_FILE`; nothing without it.
+fn save_state(state: &AppState) {
+    let Some(path) = state_file() else { return };
+    let snapshot = state.engine.lock().unwrap().to_persisted();
+    match pythia_core::persist::save(&path, &snapshot) {
+        Ok(()) => tracing::debug!("state saved to {}", path.display()),
+        Err(e) => tracing::warn!("state not saved to {}: {e}", path.display()),
     }
 }
 
@@ -1690,6 +1696,22 @@ async fn main() {
         }
     }
 
+    // The port first: a second server on the same port ends here, before it
+    // has read the state file or started a tick.
+    // Loopback by default: the API has no login of its own (SECURITY.md).
+    let addr = std::env::var("PYTHIA_BIND").unwrap_or_else(|_| DEFAULT_BIND.into());
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(
+                "cannot bind {addr}: {e}\n\
+                 → is another Pythia server already running? Stop it, or set \
+                 PYTHIA_BIND to a free port in .env"
+            );
+            std::process::exit(1);
+        }
+    };
+
     let (tx, _rx) = broadcast::channel::<String>(64);
     let creds = Arc::new(credentials_from_env());
     let engine = Arc::new(Mutex::new(Engine::new()));
@@ -1850,6 +1872,10 @@ async fn main() {
     tokio::spawn(lab_loop(state.clone()));
     if state_file().is_some() {
         tokio::spawn(save_loop(state.clone()));
+    } else {
+        tracing::warn!(
+            "PYTHIA_STATE_FILE is not set: positions, autopilots and the paper record are gone when this server stops"
+        );
     }
 
     let guard_cfg = Arc::new(guard::GuardConfig::from_env());
@@ -1858,19 +1884,6 @@ async fn main() {
     }
     let app = app(state.clone(), guard_cfg);
 
-    // Loopback by default: the API has no login of its own (SECURITY.md).
-    let addr = std::env::var("PYTHIA_BIND").unwrap_or_else(|_| DEFAULT_BIND.into());
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(
-                "cannot bind {addr}: {e}\n\
-                 → is another Pythia server already running? Stop it, or set \
-                 PYTHIA_BIND to a free port in .env"
-            );
-            std::process::exit(1);
-        }
-    };
     tracing::info!("Pythia backend listening on http://{addr}");
     if !addr.starts_with("127.") && !addr.starts_with("[::1]") && !addr.starts_with("localhost") {
         tracing::warn!(
@@ -1881,7 +1894,41 @@ async fn main() {
     log_venue_preflight(&state);
 
     // With the peer address: `POST /api/alerts/event` takes events from this machine only.
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+    let serve = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>());
+    tokio::select! {
+        r = async { serve.await } => {
+            if let Err(e) = r {
+                tracing::error!("the HTTP server stopped: {e}");
+            }
+        }
+        () = stop_signal() => tracing::info!("stopping"),
+    }
+    // What happened since the last minute's checkpoint is saved too.
+    save_state(&state);
+}
+
+/// Ctrl+C, or the SIGTERM of `docker stop` and systemd.
+async fn stop_signal() {
+    let ctrl_c = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        () = term => {}
+    }
 }
 
 /// Where the API listens when `PYTHIA_BIND` is unset: this machine only.
@@ -2017,10 +2064,15 @@ async fn tick_loop(state: AppState) {
         // mutex is only ever taken for the synchronous apply.
         if n % QUOTES_EVERY == 1 {
             let (key, secret, feed) = alpaca_data_keys(&state.creds);
-            let poly = marketdata::fetch_polymarket().await;
-            let mut alpaca = marketdata::fetch_alpaca(&key, &secret, &feed).await;
-            // Alpaca's crypto data is public, so these are real even without keys.
-            alpaca.extend(marketdata::fetch_alpaca_crypto().await);
+            // Together, not one after the other: the tick waits for the slowest
+            // of the three (5 s at most), not for their sum.
+            // Alpaca's crypto data is public, so it is real even without keys.
+            let (poly, mut alpaca, crypto) = tokio::join!(
+                marketdata::fetch_polymarket(),
+                marketdata::fetch_alpaca(&key, &secret, &feed),
+                marketdata::fetch_alpaca_crypto(),
+            );
+            alpaca.extend(crypto);
             let mut e = state.engine.lock().unwrap();
             e.apply_polymarket(&poly);
             e.apply_alpaca(&alpaca);
@@ -2030,10 +2082,13 @@ async fn tick_loop(state: AppState) {
         if n % BARS_EVERY == 1 {
             let (tf, _) = bar_timeframe();
             let (key, secret, feed) = alpaca_data_keys(&state.creds);
-            let mut series = marketdata::fetch_alpaca_bars(&key, &secret, &feed, &tf, 10).await;
-            // Three days, not ten: crypto never closes, so ten days of small
-            // bars would overrun the single page the fetch asks for.
-            series.extend(marketdata::fetch_alpaca_crypto_bars(&tf, 3).await);
+            // Three days of crypto, not ten: it never closes, so ten days of
+            // small bars would overrun the single page the fetch asks for.
+            let (mut series, crypto) = tokio::join!(
+                marketdata::fetch_alpaca_bars(&key, &secret, &feed, &tf, 10),
+                marketdata::fetch_alpaca_crypto_bars(&tf, 3),
+            );
+            series.extend(crypto);
             if !series.is_empty() {
                 state.engine.lock().unwrap().apply_bars(&series);
             }
@@ -2048,15 +2103,17 @@ async fn tick_loop(state: AppState) {
         let (json, queued, events) = {
             let mut e = state.engine.lock().unwrap();
             e.tick();
-            (serde_json::to_string(&e.state()).unwrap_or_default(), e.drain_alerts(), e.drain_alert_events())
+            (state_json(&state, &e), e.drain_alerts(), e.drain_alert_events())
         };
         if let Some(sink) = &state.alert_sink {
             for ev in events {
                 sink.send(ev);
             }
         }
-        // Ignore the "no receivers" error — clients come and go.
-        let _ = state.tx.send(json);
+        // Ignore the "no receivers" error: clients come and go.
+        if let Some(json) = json {
+            let _ = state.tx.send(json);
+        }
 
         if !queued.is_empty() {
             let url = state.webhook.lock().unwrap().clone();
@@ -2094,9 +2151,17 @@ async fn tick_loop(state: AppState) {
 
         // Push the post-execution state so listeners see fills promptly rather
         // than a tick later.
-        let s = serde_json::to_string(&state.engine.lock().unwrap().state()).unwrap_or_default();
-        let _ = state.tx.send(s);
+        let json = state_json(&state, &state.engine.lock().unwrap());
+        if let Some(json) = json {
+            let _ = state.tx.send(json);
+        }
     }
+}
+
+/// The state for the stream, or `None` while nobody listens: building and
+/// writing it twice a tick for no one is most of an idle server's work.
+fn state_json(state: &AppState, e: &Engine) -> Option<String> {
+    (state.tx.receiver_count() > 0).then(|| serde_json::to_string(&e.state()).unwrap_or_default())
 }
 
 /// Which Alpaca endpoint the broker status is read from: the live one only

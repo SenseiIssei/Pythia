@@ -217,3 +217,15 @@ fn the_token_compare_needs_the_whole_secret() {
 fn the_server_listens_on_loopback_unless_told_otherwise() {
     assert_eq!(DEFAULT_BIND, "127.0.0.1:8787");
 }
+
+#[test]
+fn the_state_is_written_only_for_a_listener() {
+    let st = state();
+    let e = st.engine.lock().unwrap();
+    assert!(state_json(&st, &e).is_none());
+    let rx = st.tx.subscribe();
+    let json = state_json(&st, &e).expect("a listener gets the state");
+    assert!(json.contains("\"portfolio\""));
+    drop(rx);
+    assert!(state_json(&st, &e).is_none());
+}
