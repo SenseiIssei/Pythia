@@ -80,7 +80,7 @@ pub struct AckView {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
 pub struct Limits {
-    /// "wallet" or "fixed". With wallet limits the daily loss and total are null (no such limit).
+    /// "wallet" or "fixed". With wallet limits the stake follows the wallet under the same caps.
     pub kind: Option<String>,
     pub max_trade_sol: Option<f64>,
     pub max_open: Option<u32>,

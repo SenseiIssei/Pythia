@@ -21,7 +21,7 @@ export interface PumpfunAck {
   stakeShare?: number | null;
 }
 
-/** Where a bot's limits come from: the wallet (a share of it, no daily loss or total budget) or fixed amounts. */
+/** Where a bot's limits come from: the wallet (the stake is a share of it, under the code's caps) or fixed amounts. */
 export type LimitsKind = "wallet" | "fixed";
 
 /** Where the share in force comes from: the code default, the confirmation file, or the owner's override in the app. */
@@ -418,7 +418,7 @@ export function sol(v: number | null | undefined, signed = false, dp = 4): strin
   return `${signed ? (v > 0 ? "+" : v < 0 ? "-" : "") : v < 0 ? "-" : ""}${s} SOL`;
 }
 
-/** A SOL amount in euro at the given rate, in the reader's locale ("9,87 €"); "" without a rate. */
+/** A SOL amount in euro at the given rate, written like every other amount ("€9.87"); "" without a rate. */
 export function eur(v: number | null | undefined, rate: SolEur | null | undefined, signed = false): string {
   if (v == null || !Number.isFinite(v) || !rate || !(rate.price > 0)) return "";
   const x = v * rate.price;

@@ -3,7 +3,7 @@ import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Button } from "../design";
 import { ConfirmAction } from "../pagekit";
-import { MasterView, PumpfunMaster, OnchainMaster, WALLET_LIMIT, type MasterViewProps } from "./MasterPanel";
+import { MasterView, PumpfunMaster, OnchainMaster, type MasterViewProps } from "./MasterPanel";
 import { pumpfunControl, type ControlPatch, type PumpfunView, type StatusControl } from "../pumpfunLive";
 import { onchainControl, parseOnchainView } from "../onchainLive";
 
@@ -173,18 +173,21 @@ describe("the panels on the pages", () => {
     await expect(onchainControl({ paused: true })).rejects.toThrow("connected backend");
   });
 
-  it("pump.fun with wallet limits: the stake and no daily loss or total budget; off on the desktop", () => {
+  it("pump.fun with wallet limits: the stake, the daily loss limit and the total budget in force; off on the desktop", () => {
     vi.stubEnv("VITE_PYTHIA_SERVER", "");
     const v = {
       running: true,
-      status: { ack: { limits: "wallet", stakeShare: 0.5 }, limits: { kind: "wallet" }, stake: { sol: 0.45, why: "50 % of 0.90 SOL (limits: wallet)", share: 0.5 }, control: status({ share: 0.5 }), low: null },
+      status: { ack: { limits: "wallet", stakeShare: 0.5 }, limits: { kind: "wallet", maxDailyLossSol: 0.5, maxTotalSol: 2 }, stake: { sol: 0.45, why: "50 % of 0.90 SOL (limits: wallet)", share: 0.5 }, control: status({ share: 0.5 }), low: null },
       control: { share: null, paused: false, setAt: null, shareSetAt: null, pausedAt: null },
     } as unknown as PumpfunView;
     const html = renderToStaticMarkup(<PumpfunMaster v={v} onDone={() => {}} />);
     expect(html).toContain("limits: wallet");
     expect(html).toContain("0.450 SOL");
     expect(html).toContain("50 % of 0.90 SOL (limits: wallet)");
-    expect(html).toContain(WALLET_LIMIT);
+    // The caps hold with limits=wallet too, and the panel says what they are.
+    expect(html).toContain("0.500 SOL");
+    expect(html).toContain("2.000 SOL");
+    expect(html).not.toContain("the wallet is the limit");
     expect(html).toContain("connected backend on the server");
     // An old status file without any of the new fields still shows.
     expect(renderToStaticMarkup(<PumpfunMaster v={{ running: false, status: null } as unknown as PumpfunView} onDone={() => {}} />)).toContain("limits: fixed");
@@ -196,7 +199,7 @@ describe("the panels on the pages", () => {
       running: true,
       status: {
         t: 1, running: true, on: true, ack: { mode: "test", limits: "wallet" },
-        limits: { kind: "wallet", maxTotalUsd: 200, maxTradeUsd: 50, maxDailyLossUsd: null, maxConvertUsd: 200 },
+        limits: { kind: "wallet", maxTotalUsd: 200, maxTradeUsd: 50, maxDailyLossUsd: 25, maxConvertUsd: 200 },
         control: { limits: "wallet", share: null, shareSource: "ack", bookUsd: 150, ackBookUsd: 150, paused: true, pausedSince: 1, controlOk: true },
         low: { have: 0.01, need: 0.03, unit: "SOL" },
       },
@@ -208,7 +211,8 @@ describe("the panels on the pages", () => {
     const html = renderToStaticMarkup(<OnchainMaster v={v} onDone={() => {}} />);
     expect(html).toContain("$150.00 a book");
     expect(html).toContain("$50.00");
-    expect(html).toContain(WALLET_LIMIT);
+    expect(html).toContain("$25.00");
+    expect(html).not.toContain("the wallet is the limit");
     expect(html).toContain("Start");
     expect(html).toContain("your conversions still work");
     expect(html).toContain("have 0.01 SOL, need 0.03 SOL");
