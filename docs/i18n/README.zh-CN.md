@@ -74,7 +74,7 @@ PYTHIA_DATA=/path/to/lab/data python scripts/readme_charts.py
 
 ## 快速开始
 
-需要 Node.js（当前 LTS）、Rust 1.85 或更高版本，实验室还需要 Python 3。
+需要 Node.js（当前 LTS）、Rust 1.90 或更高版本，实验室还需要 Python 3。
 
 桌面应用：
 

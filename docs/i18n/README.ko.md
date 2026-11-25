@@ -74,7 +74,7 @@ PYTHIA_DATA=/path/to/lab/data python scripts/readme_charts.py
 
 ## 시작하기
 
-Node.js(현재 LTS), Rust 1.85 이상, 연구실에는 Python 3가 필요합니다.
+Node.js(현재 LTS), Rust 1.90 이상, 연구실에는 Python 3가 필요합니다.
 
 데스크톱 앱:
 

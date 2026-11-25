@@ -74,7 +74,7 @@ Without `PYTHIA_DATA` the forward chart is skipped.
 
 ## Getting started
 
-You need Node.js (current LTS), Rust 1.85 or newer and, for the lab, Python 3.
+You need Node.js (current LTS), Rust 1.90 or newer and, for the lab, Python 3.
 
 Desktop app:
 

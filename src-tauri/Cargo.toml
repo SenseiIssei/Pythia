@@ -4,7 +4,7 @@ version = "0.5.1"
 description = "Autonomous multi-venue prediction & trading cockpit"
 authors = ["SenseiIssei"]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.90"
 
 [lib]
 name = "pythia_lib"

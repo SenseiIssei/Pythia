@@ -74,7 +74,7 @@ Ohne `PYTHIA_DATA` fällt die Vorwärtsgrafik weg.
 
 ## Loslegen
 
-Du brauchst Node.js (aktuelles LTS), Rust 1.85 oder neuer und für das Labor Python 3.
+Du brauchst Node.js (aktuelles LTS), Rust 1.90 oder neuer und für das Labor Python 3.
 
 Desktop-App:
 

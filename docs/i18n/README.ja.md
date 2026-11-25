@@ -74,7 +74,7 @@ PYTHIA_DATA=/path/to/lab/data python scripts/readme_charts.py
 
 ## はじめに
 
-Node.js（現行 LTS）、Rust 1.85 以降、ラボには Python 3 が必要です。
+Node.js（現行 LTS）、Rust 1.90 以降、ラボには Python 3 が必要です。
 
 デスクトップアプリ：
 

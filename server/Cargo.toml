@@ -2,7 +2,7 @@
 name = "pythia-server"
 version = "0.5.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.90"
 description = "Pythia standalone backend: HTTP + WebSocket over the shared engine core."
 
 [[bin]]

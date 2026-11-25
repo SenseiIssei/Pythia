@@ -74,7 +74,7 @@ Sem `PYTHIA_DATA`, o gráfico do histórico real é pulado.
 
 ## Primeiros passos
 
-Você precisa de Node.js (LTS atual), Rust 1.85 ou mais recente e, para o laboratório, Python 3.
+Você precisa de Node.js (LTS atual), Rust 1.90 ou mais recente e, para o laboratório, Python 3.
 
 Aplicativo de desktop:
 
