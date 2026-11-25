@@ -107,6 +107,8 @@ pip install -r requirements.txt
 python -m pytest tests
 ```
 
+ラボには Linux か macOS が必要です（`fcntl` でファイルをロックします）。Windows では WSL を使ってください。
+
 データは `research/recorder` のレコーダーと、その履歴バックフィルから来ます。[`research/lab/README.md`](../../research/lab/README.md) にすべての研究が、[`research/ops/README.md`](../../research/ops/README.md) に定期ジョブが載っています。
 
 チェック：

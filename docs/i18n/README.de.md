@@ -107,6 +107,8 @@ pip install -r requirements.txt
 python -m pytest tests
 ```
 
+Das Labor braucht Linux oder macOS (es sperrt Dateien mit `fcntl`); unter Windows nimm WSL.
+
 Die Daten kommen vom Recorder in `research/recorder` und seinem Verlaufs-Backfill. [`research/lab/README.md`](../../research/lab/README.md) listet jede Studie, [`research/ops/README.md`](../../research/ops/README.md) die geplanten Jobs.
 
 Prüfungen:

@@ -107,6 +107,8 @@ pip install -r requirements.txt
 python -m pytest tests
 ```
 
+实验室需要 Linux 或 macOS（用 `fcntl` 锁定文件）；在 Windows 上请使用 WSL。
+
 数据来自 `research/recorder` 中的记录器及其历史回填。[`research/lab/README.md`](../../research/lab/README.md) 列出了每项研究，[`research/ops/README.md`](../../research/ops/README.md) 列出了定时任务。
 
 检查：

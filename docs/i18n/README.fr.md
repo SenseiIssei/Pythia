@@ -107,6 +107,8 @@ pip install -r requirements.txt
 python -m pytest tests
 ```
 
+Le laboratoire demande Linux ou macOS (il verrouille des fichiers avec `fcntl`) ; sous Windows, utilisez WSL.
+
 Les données viennent de l'enregistreur dans `research/recorder` et de son historique rechargé. [`research/lab/README.md`](../../research/lab/README.md) liste chaque étude, [`research/ops/README.md`](../../research/ops/README.md) les tâches planifiées.
 
 Vérifications :

@@ -107,6 +107,8 @@ pip install -r requirements.txt
 python -m pytest tests
 ```
 
+The lab needs Linux or macOS (it locks files with `fcntl`); on Windows use WSL.
+
 The data comes from the recorder in `research/recorder` and its history backfill. [`research/lab/README.md`](research/lab/README.md) lists every study, [`research/ops/README.md`](research/ops/README.md) the scheduled jobs.
 
 Checks:

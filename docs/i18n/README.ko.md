@@ -107,6 +107,8 @@ pip install -r requirements.txt
 python -m pytest tests
 ```
 
+연구실에는 Linux나 macOS가 필요합니다(`fcntl`로 파일을 잠급니다). Windows에서는 WSL을 사용하세요.
+
 데이터는 `research/recorder`의 레코더와 그 과거 데이터 백필에서 옵니다. [`research/lab/README.md`](../../research/lab/README.md)에 모든 연구가, [`research/ops/README.md`](../../research/ops/README.md)에 예약 작업이 정리되어 있습니다.
 
 검사:
