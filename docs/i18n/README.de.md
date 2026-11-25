@@ -32,7 +32,7 @@ Die Builds sind noch nicht signiert. Windows fragt einmal nach (Weitere Informat
 
 - Ein Autopilot ist ein Betrag, der selbstständig eine Strategie handelt, bis du ihn stoppst oder eine Stoppregel greift. Mehrere laufen nebeneinander, jeder wird an BTC gemessen.
 - Krypto, US-Aktien und ETFs laufen auf dem Alpaca-Papierkonto. Die Long/Short-Bücher handeln Perps auf Papier oder auf einem Bybit-Demokonto, wenn du Demo-Schlüssel hinterlegst.
-- Vor jeder Order steht der Risikomanager: Not-Aus, Tagesverlust- und Drawdown-Grenzen, Positionsobergrenzen, Volatilitätssteuerung. Ist etwas unklar, lehnt er ab.
+- Vor jeder Order, die eine Position öffnet oder vergrößert, steht der Risikomanager (Schließen wird nie blockiert): Not-Aus, Tagesverlust- und Drawdown-Grenzen, Positionsobergrenzen, Volatilitätssteuerung. Ist etwas unklar, lehnt er ab.
 - Jede Studie im Labor wird vor ihrem ersten Lauf festgeschrieben, nach Kosten außerhalb der Stichprobe getestet, und ihre Sharpe wird um die Zahl aller bisherigen Versuche bereinigt.
 - Modelle (Volatilität, Coin-Ranking, Renditequantile) werden im Labor trainiert und von der Engine ausgeführt. Sie laufen zuerst im Schatten, bevor sie einen Trade beeinflussen dürfen.
 - Meldungen kommen über Telegram oder einen beliebigen Webhook, auf Deutsch oder Englisch.
@@ -117,6 +117,8 @@ npm run preflight
 npm run security:scan
 ```
 
+Installiere den Pre-Commit-Hook einmal pro Klon, damit kein Geheimnis, keine Adresse und kein privater Pfad in einen Commit gerät: `git config core.hooksPath scripts/hooks` (oder `npm run hooks:install`).
+
 Unter Windows entfernen die npm-Skripte `CC` und `CXX` aus der Umgebung, weil Pfade mit Leerzeichen native Rust-Builds kaputt machen.
 
 ## Verzeichnisse
@@ -137,10 +139,11 @@ Unter Windows entfernen die npm-Skripte `CC` und `CXX` aus der Umgebung, weil Pf
 ## Sicherheit
 
 - Eine frische Installation handelt nichts Echtes. Autopiloten starten auf Papier oder auf dem Demokonto einer Börse.
-- Live-Handel braucht deine eigenen Schlüssel und eine getippte Bestätigung pro Börse. Nichts schaltet sich selbst scharf.
+- Live-Handel braucht deine eigenen Schlüssel, die Börsen deiner Wahl und eine getippte Bestätigung. Nichts schaltet sich selbst scharf.
 - Schlüssel liegen im Schlüsselbund des Betriebssystems oder in der Umgebung des Servers und werden nie geloggt oder an die Oberfläche geschickt.
 - Pythia hat keine Funktion für Auszahlungen, Einzahlungen oder Überweisungen. Gib API-Schlüsseln nur Handelsrechte.
-- Krypto-Spot ist nur long, Shorts gibt es nur auf Perps, Polymarket wird nur gelesen.
+- Zwei kleine Wallets auf dem Server des Besitzers sind die Ausnahme von API-Schlüsseln; sie sind im Code begrenzt und standardmäßig aus.
+- Krypto-Spot ist nur long, Perps können auf Papier oder Demo short gehen, Aktien-Shorts sind standardmäßig aus, Polymarket wird nur gelesen.
 
 Die vollständige Liste steht in [SAFETY.md](../../SAFETY.md). Sicherheitslücken bitte über [SECURITY.md](../../SECURITY.md) melden.
 

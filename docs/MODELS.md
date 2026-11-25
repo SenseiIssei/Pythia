@@ -13,7 +13,7 @@ research/lab (Python, VPS)                 crates/pythia-ml (pure Rust)        c
                                                                           forecast the next, check drift
 ```
 
-Only one model runs today: **next-hour volatility** (`vol_1h`), LightGBM on 21
+The first model, and the one this page describes: **next-hour volatility** (`vol_1h`), LightGBM on 21
 features from 1-minute Binance spot klines, 20 coins pooled. In the lab it beat
 the HAR baseline in 24 of 24 quarters since 2021, 11.8 % lower QLIKE.
 

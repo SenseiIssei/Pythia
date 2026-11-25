@@ -32,7 +32,7 @@ Les versions ne sont pas encore signées. Windows demande une fois (Informations
 
 - Un autopilote est un montant qui trade une stratégie tout seul jusqu'à ce que vous l'arrêtiez ou qu'une règle d'arrêt se déclenche. Plusieurs tournent côte à côte, chacun mesuré face au BTC.
 - Crypto, actions américaines et ETF sont tradés sur le compte papier d'Alpaca. Les portefeuilles long/short tradent des perpétuels sur papier, ou sur un compte démo Bybit si vous ajoutez des clés de démo.
-- Le gestionnaire de risque se place devant chaque ordre : arrêt d'urgence, limites de perte journalière et de drawdown, plafonds d'exposition, ciblage de volatilité. Dans le doute, il refuse.
+- Le gestionnaire de risque se place devant chaque ordre qui ouvre ou agrandit une position (une clôture n'est jamais bloquée) : arrêt d'urgence, limites de perte journalière et de drawdown, plafonds d'exposition, ciblage de volatilité. Dans le doute, il refuse.
 - Chaque étude du laboratoire est enregistrée avant sa première exécution, testée hors échantillon après coûts, et son Sharpe est corrigé du nombre total d'essais effectués (deflated Sharpe).
 - Les modèles (volatilité, classement des cryptos, quantiles de rendement) sont entraînés dans le laboratoire et exécutés par le moteur. Ils tournent d'abord en mode fantôme avant de pouvoir influencer un trade.
 - Les alertes arrivent sur Telegram ou n'importe quel webhook, en anglais ou en allemand.
@@ -117,6 +117,8 @@ npm run preflight
 npm run security:scan
 ```
 
+Installez le hook de pre-commit une fois par clone, pour qu'aucun secret, aucune adresse ni aucun chemin personnel n'arrive dans un commit : `git config core.hooksPath scripts/hooks` (ou `npm run hooks:install`).
+
 Sous Windows, les scripts npm retirent `CC` et `CXX` de l'environnement, car les chemins avec des espaces cassent les compilations natives Rust.
 
 ## Arborescence
@@ -137,10 +139,11 @@ Sous Windows, les scripts npm retirent `CC` et `CXX` de l'environnement, car les
 ## Sécurité
 
 - Une installation neuve ne trade rien de réel. Les autopilotes démarrent sur papier ou sur le compte démo d'une plateforme.
-- Le trading réel exige vos propres clés et une confirmation saisie pour chaque plateforme. Rien ne s'active tout seul.
+- Le trading réel exige vos propres clés, les plateformes que vous choisissez et une confirmation saisie. Rien ne s'active tout seul.
 - Les clés sont stockées dans le trousseau du système ou dans l'environnement du serveur, jamais journalisées ni envoyées à l'interface.
 - Pythia n'a aucune fonction de retrait, de dépôt ou de virement. Ne donnez aux clés d'API que le droit de trader.
-- Le spot crypto est uniquement long, les ventes à découvert n'existent que sur les perpétuels, Polymarket est en lecture seule.
+- Deux petits portefeuilles sur le serveur du propriétaire font exception aux clés d'API ; ils sont plafonnés dans le code et désactivés par défaut.
+- Le spot crypto est uniquement long, les perpétuels peuvent être vendus à découvert sur papier ou en démo, les ventes à découvert d'actions sont désactivées par défaut, Polymarket est en lecture seule.
 
 La liste complète est dans [SAFETY.md](../../SAFETY.md). Les problèmes de sécurité se signalent selon [SECURITY.md](../../SECURITY.md).
 

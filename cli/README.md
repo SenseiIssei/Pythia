@@ -8,7 +8,7 @@ Two programs:
 ## Start
 
 ```bash
-cp .env.example .env      # optional: keys, alerts; without keys everything stays on paper
+cp .env.example .env      # keys and alerts are optional; it also sets where the paper record is kept
 ./pythia serve            # starts pythia-server in this terminal, on 127.0.0.1:8787
 ```
 

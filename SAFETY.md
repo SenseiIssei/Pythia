@@ -25,12 +25,14 @@ lose entirely.
 
 1. Pythia starts in **paper mode**. No connector can move money without keys.
 2. **You** enter API keys into the app; they go to the OS keychain, never into code or logs.
-3. You arm live execution **per venue** with a typed `ARM LIVE` confirmation. Arming runs a
-   read-only credential check first and refuses if a venue does not answer — so a wrong key surfaces
-   before an order exists, not after.
+3. You choose the venues that may route live and arm them with a typed `ARM LIVE` confirmation.
+   Arming runs a read-only credential check on every chosen venue first and refuses if one does not
+   answer, so a wrong key surfaces before an order exists. The typed phrase is a guard of the app:
+   the server's API itself arms on `armed: true` after the same check, which is one more reason to
+   keep that API on this machine or behind a login (`SECURITY.md`).
 4. A strategy still has to be set to **Live** individually before it sends anything.
-5. The **risk manager** sits above every live order (kill switch, daily-loss cap, size caps), and the
-   venue connector refuses orders that cannot fill (market closed, no buying power, would open a
+5. The **risk manager** sits above every order that opens or adds to a position (kill switch,
+   daily-loss cap, size caps); an order that only closes one is never blocked. The venue connector refuses orders that cannot fill (market closed, no buying power, would open a
    short) *before* submitting them.
 
 Nobody but you enters your credentials, funds an account, or decides to trade. The software
@@ -70,11 +72,11 @@ is why Polymarket order routing is not implemented: its CLOB is signed with a Po
 rather than a revocable credential, which is a different risk category and needs its own gates. See
 `PROFIT-PLAN.md` §7.3.
 
-## 3b-1. The one exception: the pump.fun test wallet on the server
+## 3b-1. The first exception: the pump.fun wallet on the server
 
 The pump.fun bot cannot trade with an API key: on Solana every trade is signed by a wallet key.
-At the owner's explicit request there is exactly one such wallet, with these lines
-(`docs/PUMPFUN-LIVE.md`):
+At the owner's explicit request there is one such wallet for it (the second wallet is in §3b-2), with
+these lines (`docs/PUMPFUN-LIVE.md`):
 
 - **The owner makes it himself**, interactively on the server, with the lab's wallet tool. It is
   the only code in Pythia that makes a key. The app has no field for it; the key never leaves the
@@ -84,16 +86,42 @@ At the owner's explicit request there is exactly one such wallet, with these lin
   wallet or exchange. Nothing in Pythia withdraws or transfers; before signing, the executor refuses
   any instruction that is not a plain pump.fun buy or sale for the wallet itself. He withdraws by
   importing his backup into his own wallet.
-- **It is a small, capped test.** At most 2 SOL in all, 0.5 SOL a day, 0.25 SOL a trade, 0.6 SOL
+- **It is a small, capped test** while the confirmation says `mode=test`. At most 2 SOL in all, 0.5 SOL a day, 0.25 SOL a trade, 0.6 SOL
   open and 5 positions (hard in code; `limits=wallet` in the confirmation only sizes the stake from
   the wallet under them, and no file, app setting or environment variable lifts them), the owner's
   written confirmation, a passed mainnet simulation, a kill switch in the app
-  that only the server can undo, and a service he starts by hand. Expect to lose all of it.
+  that only the server can undo, and a service he starts by hand. Expect to lose all of it. The
+  order limit of a buy is its stake plus its slippage room, so a 0.25 SOL buy may cost up to 0.325.
+- **The full mode has wider caps and another gate.** With `mode=full`, or with no `mode` line at
+  all, the daily loss is capped at 1.0 SOL and there is no total budget unless the app sets one; the
+  per-trade, exposure and position caps above stay. It needs neither the simulation nor the "I accept
+  that I can lose all of it" line; instead the strategy must pass the readiness report (14 days, 300
+  trades out of sample, 30 days of the live paper shadow).
+- **Two protections are the owner's to switch off** with `limits=wallet`: the drawdown brake and the
+  pause under 0.25 SOL (`brake` and `floor_sol` in `control.json`). The caps above stay.
 - **One faster path, the owner's switch.** With `PYTHIA_PUMPFUN_SENDER` set, our own single
   transaction goes out through Helius Sender's stake-weighted path (`swqos_only=true`, never a
   bundle) and carries one tip of at most 0.0001 SOL to one of Sender's ten published tip accounts.
-  The executor refuses any other tip, any other Sender route, and a second tip; when Sender does not
-  answer, the plain RPC sends the same transaction.
+  The executor refuses any other tip, any other Sender route, and a second tip. The plain RPC sends
+  the same transaction when Sender does not answer, or at the same time when the owner switches
+  parallel sending on.
+
+## 3b-2. The second exception: the on-chain wallet on the server
+
+The on-chain trader swaps a short list of coins on Solana through Jupiter, from a second wallet with
+its own key file on the server. The lines of §3b-1 hold for it too: the owner makes the key, the key
+never leaves the server, money only comes in from the owner, and no instruction that transfers
+money out passes its guard (`docs/ONCHAIN-STAGE2.md`).
+
+- **Caps in code, whatever the confirmation says.** In test mode 500 USD in all, 100 USD a swap, 100
+  USD loss a day; in alpha mode, where a book trades without the proof, 100, 25 and 25 USD. With
+  `limits=wallet` a swap is at most a quarter of the wallet's value, the day's loss at most 25 USD, and
+  the mode's caps stay on top. Memecoins have their own: 50 USD held, 10 USD a swap, 10 USD loss a day.
+- **You can convert from the app**, with a quote and a 60 s confirmation: at most 250 USD a day in test
+  mode, 100 in alpha.
+- **It needs** the owner's written confirmation with an expiry date, a simulation of the last 24 hours,
+  a service he starts by hand, and no kill file. The app's kill switch stops it; only the server can
+  undo that. Expect to lose all of it.
 
 ## 3c. Crypto spot is long-only
 
@@ -119,8 +147,8 @@ stop rules fires (max loss, take profit, trailing floor, end time). It is an ord
 and nothing more:
 
 - **The money is already at the venue.** The amount lives in an exchange or broker account that
-  **you** funded. Pythia has no deposit, withdrawal or transfer function anywhere, and a test checks
-  that none appears. Your Exodus wallet (or any other wallet) stays a **watched treasury**: Pythia
+  **you** funded. Pythia has no deposit, withdrawal or transfer function anywhere, and a test looks
+  for one in the engine's order path and connectors. Your Exodus wallet (or any other wallet) stays a **watched treasury**: Pythia
   reads its balance by public address and cannot move a coin out of it. Moving money from the wallet
   to an exchange is something you do yourself, deliberately, outside Pythia.
 - **Live is gated harder than anything else.** A live autopilot starts only when live routing is

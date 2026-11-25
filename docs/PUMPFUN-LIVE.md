@@ -20,9 +20,9 @@ den Echtgeld-Dienst.
   liest die öffentliche Blockchain und schickt einfache Kauf- und
   Verkaufstransaktionen der öffentlichen Programme an einen öffentlichen
   RPC-Endpunkt. Keine Bundles, keine privaten Relays, kein Front-Running,
-  keine Umgehung irgendeiner Erkennung. Tips gibt es nur, wenn du selbst
-  `PYTHIA_PUMPFUN_JITO=1` setzt, und dann nur als Trinkgeld in deiner eigenen
-  einzelnen Kauf- oder Verkaufstransaktion (Abschnitt 10). Du entscheidest mit
+  keine Umgehung irgendeiner Erkennung. Ein Trinkgeld gibt es nur, wenn du selbst
+  Helius Sender (`PYTHIA_PUMPFUN_SENDER`) oder `PYTHIA_PUMPFUN_JITO=1` setzt, und dann nur
+  in deiner eigenen einzelnen Kauf- oder Verkaufstransaktion (Abschnitt 10). Du entscheidest mit
   diesem Wissen.
 - **Steuern sind deine Sache.** Jeder Kauf und Verkauf eines Tokens ist ein
   steuerlich relevanter Vorgang. Die Abschlüsse stehen in
@@ -132,6 +132,9 @@ von Sekunden (der Dienst liest `reports/pumpfun_rt/control.json` alle 2 s), ohne
   der bleibt, wie er ist (verkauft alles, nur der Server kann ihn löschen).
 - **Bremse: an/aus:** schaltet die Drawdown-Bremse (`brake` in `control.json`). Aus fragt nach; dann bleibt
   der Einsatz nach Verlusten der volle Anteil. Wirkt nur mit `limits=wallet`, sonst bleibt sie an.
+- **Untergrenze (`floor_sol`, 0 bis 10 SOL):** ersetzt die Pause unter 0,25 SOL Basis; kein Feld in der
+  App, nur über `POST /api/pumpfun/live/control`. Bremse und Pause kannst du also beide abschalten, die
+  Höchstwerte oben bleiben. Wirkt nur mit `limits=wallet`.
 
 Jede Änderung schickt eine Karte an Telegram und Discord; der Status zeigt "paused by the owner since
 hh:mm" (UTC). Eine kaputte `control.json` wird ignoriert, die letzten guten Werte bleiben.
