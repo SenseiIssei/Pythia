@@ -1,0 +1,37 @@
+# The UI: types, tests and the production build. Runs on every push, because
+# the Research page bundles research/lab/results and a result file can break it.
+name: Web
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Types, tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+      - name: Tests again on a German machine in another time zone
+        run: npx vitest run
+        env:
+          LC_ALL: de_DE.UTF-8
+          TZ: Asia/Tokyo
+      - run: npm run build
