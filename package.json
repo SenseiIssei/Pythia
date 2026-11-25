@@ -16,6 +16,7 @@
     "preflight": "node scripts/preflight.mjs",
     "validate": "node scripts/validate.mjs",
     "shots": "node scripts/shots.mjs",
+    "bench:ui": "node scripts/uibench.mjs",
     "hooks:install": "git config core.hooksPath scripts/hooks",
     "security:scan": "sh scripts/security-scan.sh"
   },

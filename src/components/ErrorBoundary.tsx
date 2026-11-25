@@ -8,6 +8,9 @@ interface State {
   error: Error | null;
 }
 
+/** The code of a page could not be fetched: the server was updated under an open tab, or is away. */
+const isMissingChunk = (e: Error) => /dynamically imported module|importing a module script failed/i.test(e.message);
+
 /**
  * One broken page must not take the app (and the stop button in the titlebar)
  * down with it. Says what happened in plain words, keeps the technical message
@@ -29,7 +32,7 @@ export class ErrorBoundary extends Component<Props, State> {
             <div className="min-w-0">
               <div className="font-semibold text-danger">This page ran into a problem</div>
               <p className="mt-1 text-sm text-cyber-text-dim">
-                The rest of the app keeps working, and the engine is not affected. The KILL button at the top still
+                The rest of the app keeps working, and the engine is not affected. The Stop button at the top still
                 stops all new trades.
               </p>
               <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-cyber-border bg-cyber-bg/60 p-2 font-mono text-xs text-cyber-text-dim">
@@ -37,10 +40,10 @@ export class ErrorBoundary extends Component<Props, State> {
               </pre>
               <button
                 type="button"
-                onClick={() => this.setState({ error: null })}
+                onClick={() => (isMissingChunk(this.state.error!) ? window.location.reload() : this.setState({ error: null }))}
                 className="mt-3 rounded-lg border border-cyber-border-bright bg-cyber-surface-2 px-3 py-1.5 text-sm text-cyber-text hover:bg-cyber-border-bright"
               >
-                Try again
+                {isMissingChunk(this.state.error) ? "Reload the app" : "Try again"}
               </button>
             </div>
           </div>
