@@ -1,4 +1,4 @@
-import { ShieldAlert, Github, BookOpen, Server, Cpu, BrainCircuit, Coffee, Globe, ExternalLink, type LucideIcon } from "lucide-react";
+import { ShieldAlert, CodeXml, BookOpen, Server, Cpu, BrainCircuit, Coffee, Globe, ExternalLink, type LucideIcon } from "lucide-react";
 import { List, ListRow, Notice, Page } from "../design";
 import { Row, Section } from "../pagekit";
 import { aiMode } from "../ai";
@@ -88,7 +88,7 @@ export function About() {
       <Section title="Links" hint="Where the code lives, and how to support the project." help="The project's code, its documents and how to support it.">
         <List>
           <LinkRow href={KOFI} icon={Coffee} title="Support on Ko-fi" sub="Keeps the project going" />
-          <LinkRow href={REPO} icon={Github} title="GitHub" sub="The source code" />
+          <LinkRow href={REPO} icon={CodeXml} title="GitHub" sub="The source code" />
           <ListRow icon={BookOpen} title="PLAN.md" subtitle="The roadmap, in the repository" />
           <ListRow icon={ShieldAlert} title="SAFETY.md" subtitle="What can go wrong, and how Pythia guards against it" />
           <ListRow icon={BrainCircuit} title="by SenseiIssei" subtitle="Author" />
