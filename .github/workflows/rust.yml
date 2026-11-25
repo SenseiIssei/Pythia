@@ -52,13 +52,23 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf pkg-config
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf pkg-config gnome-keyring
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The desktop crate embeds the UI folder at build time; an empty one will do here.
       - run: mkdir -p dist
         shell: bash
-      - run: cargo test --workspace --locked
+      - name: Tests
+        if: runner.os != 'Linux'
+        run: cargo test --workspace --locked
+      # Two tests go through the real keychain; a runner has none until one is unlocked.
+      - name: Tests, with a throwaway keychain
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -euo pipefail -c '
+            printf "%s" throwaway | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            cargo test --workspace --locked
+          '
 
   msrv:
     name: Oldest supported Rust
