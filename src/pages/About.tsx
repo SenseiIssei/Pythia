@@ -3,6 +3,7 @@ import { List, ListRow, Notice, Page } from "../design";
 import { Row, Section } from "../pagekit";
 import { aiMode } from "../ai";
 import { isTauri } from "../engine";
+import { version } from "../../package.json";
 
 const REPO = "https://github.com/SenseiIssei/Pythia";
 const KOFI = "https://ko-fi.com/senseiissei";
@@ -48,7 +49,7 @@ export function About() {
     >
       <Section title="This copy" hint="Which version you run and how it is connected." help="The version and how this copy of Pythia runs.">
         <List>
-          <Row label="Version" value="v0.5" valueSub="Phase 1+" help="The app version and the phase of the plan it has reached." />
+          <Row label="Version" value={`v${version}`} help="The version of the app." />
           <Row label="Running as" value={runtime} help="Where the engine runs: the desktop app, a server, or inside this browser." />
           <Row label="Markets" value="Polymarket, crypto, equities" help="The kinds of markets Pythia watches and trades." />
           <Row label="Built as" value="One engine, three runtimes" sub="and your choice of AI" help="One engine core that runs on the desktop, on a server or in the browser." />

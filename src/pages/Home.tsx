@@ -51,6 +51,7 @@ import { groupByMoney } from "../autopilot";
 import { autopilotsWords, change, combinedCurve, combinedHoldings, inRange, positionHoldings, usefulRanges, type Point } from "../flows/homeView";
 import { totals } from "../flows/autopilotView";
 import { timeOfDay, timeline, type ActivityKind } from "../flows/activity";
+import { pricesAreMadeUp } from "../engine";
 
 const RANGE_WORDS: Record<Range, string> = {
   "1D": "past day",
@@ -370,7 +371,9 @@ function StatusCard({
     headline = "Running in practice mode";
     detail = practiceArmed
       ? "Fake money on real prices. A test connection to a broker is switched on, but on its practice account."
-      : "Fake money on real prices. Nothing leaves this computer and nothing can be lost.";
+      : pricesAreMadeUp()
+        ? "Fake money on made-up prices, inside this browser. The desktop app and the server use real prices."
+        : "Fake money on real prices. Nothing leaves this computer and nothing can be lost.";
     tint = "bg-up/10 text-up";
     Icon = ShieldCheck;
   }

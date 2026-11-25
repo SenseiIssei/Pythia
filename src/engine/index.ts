@@ -25,3 +25,8 @@ export function getEngine(): EngineClient {
 
 export type { EngineClient, EngineState } from "./client";
 export { isTauri } from "./client";
+
+/** The browser build without a server runs on made-up prices. The pages must not call them real. */
+export function pricesAreMadeUp(): boolean {
+  return !isTauri() && !serverUrl();
+}

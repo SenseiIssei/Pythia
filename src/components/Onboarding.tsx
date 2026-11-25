@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ShieldCheck, Eye, Power, KeyRound, ArrowLeft } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Button, Screen } from "../design";
+import { pricesAreMadeUp } from "../engine";
 
 const DONE_KEY = "pythia.onboarding.v1";
 
@@ -40,7 +41,9 @@ const STEPS: Step[] = [
     tint: "bg-up/10 text-up",
     title: "This is practice money",
     body: [
-      "Pythia starts with a pretend balance of 100,000 dollars. Every trade it makes is simulated on real market prices.",
+      pricesAreMadeUp()
+        ? "Pythia starts with a pretend balance of 100,000 dollars. In this browser demo the prices are made up too; the desktop app and the server use real market prices."
+        : "Pythia starts with a pretend balance of 100,000 dollars. Every trade it makes is simulated on real market prices.",
       "Nothing leaves this computer and nothing can be lost. The label at the top says Practice whenever that is true.",
     ],
   },
