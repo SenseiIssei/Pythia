@@ -12,6 +12,7 @@ pub mod alerts;
 pub mod coins;
 pub mod connectors;
 pub mod costs;
+pub mod crash;
 pub mod engine;
 pub mod execution;
 pub mod feeds;
