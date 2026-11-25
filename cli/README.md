@@ -21,7 +21,8 @@ In a second terminal:
 ./pythia pause <id>
 ./pythia resume <id>
 ./pythia stop <id> --flatten
-./pythia kill             # kill switch on or off, asks first
+./pythia kill on          # stop new trades now; safe to repeat
+./pythia kill off         # let them start again, asks first
 ./pythia preflight        # what blocks a paper or live run
 ./pythia watch            # status every 10 seconds
 ```
