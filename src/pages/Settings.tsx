@@ -993,9 +993,9 @@ function VenueCard({
     try {
       const a = await alpacaAccount(isPaperSlot);
       setMsg(
-        `${a.status} · equity $${Number(a.equity || a.portfolioValue).toLocaleString()} · buying power $${Number(
+        `${a.status} · equity $${Number(a.equity || a.portfolioValue).toLocaleString("en-US")} · buying power $${Number(
           a.buyingPower
-        ).toLocaleString()} · ${a.paper ? "paper" : "LIVE"} endpoint`
+        ).toLocaleString("en-US")} · ${a.paper ? "paper" : "LIVE"} endpoint`
       );
       setOk(a.status === "ACTIVE");
     } catch (e) {

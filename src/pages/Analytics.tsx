@@ -119,7 +119,7 @@ export function Analytics() {
                         <span className="break-all">{o.marketId}</span>
                       </div>
                       <div className="tabular text-[13px] text-muted">
-                        {new Date(o.ts).toLocaleTimeString()} · {num(o.filledQty, 4)} at {o.avgFillPrice?.toLocaleString() ?? "n/a"}
+                        {new Date(o.ts).toLocaleTimeString()} · {num(o.filledQty, 4)} at {o.avgFillPrice?.toLocaleString("en-US") ?? "n/a"}
                       </div>
                     </div>
                     <div className="flex shrink-0 flex-wrap justify-end gap-1">

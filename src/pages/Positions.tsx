@@ -117,8 +117,8 @@ function PositionRow({ p, onFlatten }: { p: PositionView; onFlatten: () => void 
           {/* Every autopilot keeps a book of its own: two can hold the same coin. */}
           {p.book && <div className="mt-0.5 text-[13px] text-muted">Autopilot {p.bookName ?? p.book}</div>}
           <div className="tabular mt-0.5 text-[13px] text-muted">
-            <Term k="Qty">{num(p.qty, 4)}</Term> · <Term k="Avg">avg {p.avgPrice.toLocaleString()}</Term> ·{" "}
-            <Term k="Last">last {p.lastPrice.toLocaleString()}</Term>
+            <Term k="Qty">{num(p.qty, 4)}</Term> · <Term k="Avg">avg {p.avgPrice.toLocaleString("en-US")}</Term> ·{" "}
+            <Term k="Last">last {p.lastPrice.toLocaleString("en-US")}</Term>
             {p.funding != null && <> · funding {money(p.funding)}</>}
           </div>
         </div>

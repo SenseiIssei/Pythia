@@ -623,7 +623,7 @@ export function PumpfunWallet() {
               <More title={`Tokens in the wallet on chain (${s.holdings.length})`}>
                 <div className="divide-y divide-line">
                   {s.holdings.map((h) => (
-                    <Row key={h.mint} label={short(h.mint)} value={h.amount.toLocaleString()} sub="raw token units" />
+                    <Row key={h.mint} label={short(h.mint)} value={h.amount.toLocaleString("en-US")} sub="raw token units" />
                   ))}
                 </div>
               </More>

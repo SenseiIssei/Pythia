@@ -371,7 +371,7 @@ function ModelScores({ ml, learn }: { ml: MlStatus | null; learn: LearnDigest | 
               rows={[
                 { k: "Better than the simple model, in the lab", v: pct(vol.model!.labGainVsHarPct) },
                 { k: "Better than the simple model, live", v: pct(vol.shadow.gainVsHarPct) },
-                { k: "Hours scored live", v: vol.shadow.scored.toLocaleString() },
+                { k: "Hours scored live", v: vol.shadow.scored.toLocaleString("en-US") },
                 { k: "Version", v: vol.model!.version },
               ]}
             />

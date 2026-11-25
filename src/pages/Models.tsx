@@ -97,7 +97,7 @@ export function Models() {
             },
             {
               label: "Hours scored live",
-              value: shadow.scored.toLocaleString(),
+              value: shadow.scored.toLocaleString("en-US"),
               sub: shadow.sinceMs ? `since ${fmtDate(shadow.sinceMs)}` : "first score after the next full hour",
             },
           ]}

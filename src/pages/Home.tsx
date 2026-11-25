@@ -482,8 +482,8 @@ function WeekReport() {
         {checked === 0
           ? "None of its predictions has been checked against reality yet."
           : trusted === 0
-            ? `Its predictions have been checked ${checked.toLocaleString()} times and none of its sources beats the market yet, so it is not betting on them.`
-            : `Its predictions have been checked ${checked.toLocaleString()} times, and ${trusted} source${trusted === 1 ? " has" : "s have"} earned enough trust to be acted on.`}
+            ? `Its predictions have been checked ${checked.toLocaleString("en-US")} times and none of its sources beats the market yet, so it is not betting on them.`
+            : `Its predictions have been checked ${checked.toLocaleString("en-US")} times, and ${trusted} source${trusted === 1 ? " has" : "s have"} earned enough trust to be acted on.`}
       </p>
     </Card>
   );

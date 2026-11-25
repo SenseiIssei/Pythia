@@ -423,7 +423,7 @@ export function eur(v: number | null | undefined, rate: SolEur | null | undefine
   if (v == null || !Number.isFinite(v) || !rate || !(rate.price > 0)) return "";
   const x = v * rate.price;
   const abs = Math.abs(x) < 0.005 ? 0 : x;
-  const s = Math.abs(abs).toLocaleString(undefined, { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const s = Math.abs(abs).toLocaleString("en-US", { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return `${signed ? (abs > 0 ? "+" : abs < 0 ? "-" : "") : abs < 0 ? "-" : ""}${s}`;
 }
 
