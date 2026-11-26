@@ -3,6 +3,50 @@
 All notable changes to Pythia. Versions follow [Semantic Versioning](https://semver.org); while the
 major version is 0, a minor release may change behaviour.
 
+## Unreleased
+
+### Fixed
+
+- A second start of the desktop app shows the running window. It used to start a second engine on the
+  same keys and the same state file.
+- Quit in the tray, Ctrl+C and `docker stop` save the state. Up to a minute of fills and paper record
+  was lost each time. A server without `PYTHIA_STATE_FILE` says so at the start.
+- The server takes its port before it reads the state or ticks, so a second one ends before it trades.
+- The desktop app never saves over a state file it could not read and could not move aside, and tells
+  you when it starts fresh.
+- With `limits=wallet` the app showed "none" for the daily loss limit and the total budget; it shows the
+  caps the code enforces.
+- Numbers look the same on every machine (a German Windows mixed `1.234` with `$1,234`).
+- `pythia kill --yes` twice released the kill switch. `pythia kill on` only ever engages it.
+- Kraken limit prices follow the pair's price grid and lot size; the Alpaca broker status is read from
+  the paper endpoint unless Alpaca itself is armed live.
+- Real-money caps of both server wallets that no file can lift (2 SOL, 0.5 SOL a day, 0.25 SOL a trade;
+  the on-chain caps in `SAFETY.md` 3b-2).
+
+### Added
+
+- A capped live test: one autopilot on at most 300 USD of real money without a green passport (§3f).
+- pump.fun live page, a Wallet page for the on-chain trader, Trends, News, Lab Live and Progress pages,
+  a Real money page that keeps real and practice money apart.
+- `pythia kill on` and `pythia kill off`; `pythia watch` survives an engine restart.
+- `crash.log` in the app data folder after a crash of the desktop app. It stays on the machine.
+- `npm run bench:ui`: startup and idle cost of the UI.
+- CI on every push: UI tests and build, Rust tests on Linux and Windows, the oldest supported Rust, a
+  weekly audit.
+
+### Faster
+
+- Pages load when they are opened: the first script 1,159 kB to 495 kB, the DOM 5,850 to 350 nodes.
+  Ten idle seconds cost 45 to 145 ms of main-thread time instead of 811 to 1,070 ms (headless, CPU
+  slowed four times).
+- The engine fetches its quotes together. A slow venue holds a tick for 5 s at most instead of 15 s.
+- The server writes its state for the stream only while someone listens.
+
+### Changed
+
+- Building needs Rust 1.90 (the Tauri crates ask for it). Every dependency is up to date; `npm audit` and
+  `cargo audit` report no vulnerability.
+
 ## 0.5.1 (2026-10-21)
 
 - Installers for Windows (setup .exe), macOS (universal .dmg) and Linux (.AppImage, .deb, .rpm),

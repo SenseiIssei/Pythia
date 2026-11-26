@@ -1,8 +1,9 @@
-import { ShieldAlert, Github, BookOpen, Server, Cpu, BrainCircuit, Coffee, Globe, ExternalLink, type LucideIcon } from "lucide-react";
+import { ShieldAlert, CodeXml, BookOpen, Server, Cpu, BrainCircuit, Coffee, Globe, ExternalLink, type LucideIcon } from "lucide-react";
 import { List, ListRow, Notice, Page } from "../design";
 import { Row, Section } from "../pagekit";
 import { aiMode } from "../ai";
 import { isTauri } from "../engine";
+import { version } from "../../package.json";
 
 const REPO = "https://github.com/SenseiIssei/Pythia";
 const KOFI = "https://ko-fi.com/senseiissei";
@@ -48,7 +49,7 @@ export function About() {
     >
       <Section title="This copy" hint="Which version you run and how it is connected." help="The version and how this copy of Pythia runs.">
         <List>
-          <Row label="Version" value="v0.5" valueSub="Phase 1+" help="The app version and the phase of the plan it has reached." />
+          <Row label="Version" value={`v${version}`} help="The version of the app." />
           <Row label="Running as" value={runtime} help="Where the engine runs: the desktop app, a server, or inside this browser." />
           <Row label="Markets" value="Polymarket, crypto, equities" help="The kinds of markets Pythia watches and trades." />
           <Row label="Built as" value="One engine, three runtimes" sub="and your choice of AI" help="One engine core that runs on the desktop, on a server or in the browser." />
@@ -88,7 +89,7 @@ export function About() {
       <Section title="Links" hint="Where the code lives, and how to support the project." help="The project's code, its documents and how to support it.">
         <List>
           <LinkRow href={KOFI} icon={Coffee} title="Support on Ko-fi" sub="Keeps the project going" />
-          <LinkRow href={REPO} icon={Github} title="GitHub" sub="The source code" />
+          <LinkRow href={REPO} icon={CodeXml} title="GitHub" sub="The source code" />
           <ListRow icon={BookOpen} title="PLAN.md" subtitle="The roadmap, in the repository" />
           <ListRow icon={ShieldAlert} title="SAFETY.md" subtitle="What can go wrong, and how Pythia guards against it" />
           <ListRow icon={BrainCircuit} title="by SenseiIssei" subtitle="Author" />

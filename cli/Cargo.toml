@@ -2,7 +2,7 @@
 name = "pythia-cli"
 version = "0.5.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.90"
 description = "Pythia on the command line: watch and steer a running engine, or start one."
 license = "MIT"
 

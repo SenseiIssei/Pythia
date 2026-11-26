@@ -36,7 +36,8 @@ registriert in
   first list; PYTH, JTO, RENDER, POPCAT only with a 100 USD per-trade cap (20 to 50 bps at 1,000 USD, measured
   2026-10-23). WBTC is not used (it routes through cbBTC anyway, bridge risk). Coins without an issuer-confirmed
   Solana form stay cash.
-- **Ack / caps (test mode):** total 1,000 USD, per trade 250 USD, daily loss 100 USD, converts 250 USD a day,
+- **Ack / caps (test mode):** total 500 USD, per trade 100 USD, daily loss 100 USD, converts 250 USD a day
+  (the draft had 1,000 and 250),
   hard in code; allowlisted mints and books in the file; a simulate within 24 h; kill files; a watcher; the
   narrow mounts of the pump.fun service. No transfer instruction exists in the guard, so no code path moves
   funds out. Withdrawals stay with the owner's own wallet and backup.

@@ -12,7 +12,7 @@ import { AreaChart, Badge, Button, Field, List, ListRow, Notice, Page, inputCls 
 import { ConfirmAction, KeyStats, LoadingRows, More, Nothing, Row, Section, plural } from "../pagekit";
 import { encodeQr, qrPath } from "../qr";
 import { CoinCandles } from "../components/CoinCandles";
-import { PumpfunMaster, WALLET_LIMIT } from "../components/MasterPanel";
+import { PumpfunMaster } from "../components/MasterPanel";
 import { limitsKind, limitsText } from "../masterControl";
 import {
   ALPHA_PHASE,
@@ -129,8 +129,6 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
   };
   const fmt = (k: LimitKey, x: number | null | undefined) => (x == null ? "n/a" : k === "maxOpen" ? String(x) : sol(x, false, 3));
   const kind = limitsKind(s?.control?.limits, s?.limits?.kind, s?.ack.limits);
-  // With limits=wallet there is no daily loss limit and no total budget: the wallet is the limit.
-  const none = (k: LimitKey) => kind === "wallet" && (k === "maxDailyLossSol" || k === "maxTotalSol");
   const save = async () => {
     setBusy(true);
     setErr(null);
@@ -157,7 +155,7 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
           <Row
             key={k}
             label={LIMIT_LABEL[k]}
-            value={none(k) ? WALLET_LIMIT : fmt(k, inForce[k])}
+            value={fmt(k, inForce[k])}
             valueSub="in force"
             sub={
               <>
@@ -623,7 +621,7 @@ export function PumpfunWallet() {
               <More title={`Tokens in the wallet on chain (${s.holdings.length})`}>
                 <div className="divide-y divide-line">
                   {s.holdings.map((h) => (
-                    <Row key={h.mint} label={short(h.mint)} value={h.amount.toLocaleString()} sub="raw token units" />
+                    <Row key={h.mint} label={short(h.mint)} value={h.amount.toLocaleString("en-US")} sub="raw token units" />
                   ))}
                 </div>
               </More>

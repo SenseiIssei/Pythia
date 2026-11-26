@@ -4,7 +4,7 @@ version = "0.5.1"
 description = "Autonomous multi-venue prediction & trading cockpit"
 authors = ["SenseiIssei"]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.90"
 
 [lib]
 name = "pythia_lib"
@@ -27,6 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+tauri-plugin-single-instance = "2"
 
 # Phase 2+ (uncomment as live execution lands):
 # rusqlite = { version = "0.32", features = ["bundled"] }   # persistent journal

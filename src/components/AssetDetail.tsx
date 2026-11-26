@@ -25,6 +25,7 @@ import { inRange, usefulRanges, type Point } from "../flows/homeView";
 import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
 import type { Market, Venue } from "../types";
+import { pricesAreMadeUp } from "../engine";
 
 export const VENUE_WORD: Record<Venue, string> = {
   polymarket: "Prediction",
@@ -166,7 +167,7 @@ export function AssetDetail({ marketId, onBack }: { marketId: string; onBack?: (
                 Sell
               </Button>
             </div>
-            <p className="text-[13px] text-faint">Practice money on real prices. Nothing real is bought or sold.</p>
+            <p className="text-[13px] text-faint">Practice money on {pricesAreMadeUp() ? "made-up" : "real"} prices. Nothing real is bought or sold.</p>
           </div>
         )}
         {flash && (

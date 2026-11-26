@@ -27,6 +27,29 @@ pub enum Loaded {
     Unreadable { error: String, moved_to: Option<PathBuf> },
 }
 
+impl Loaded {
+    /// Whether the host may save over the state file after this load. Not when
+    /// the file could neither be read nor moved aside: a save would replace the
+    /// only copy.
+    pub fn may_save(&self) -> bool {
+        !matches!(self, Loaded::Unreadable { moved_to: None, .. })
+    }
+
+    /// What to tell a person about it, for a host without a log anyone reads.
+    pub fn notice(&self) -> Option<String> {
+        match self {
+            Loaded::Restored(_) | Loaded::Missing => None,
+            Loaded::Unreadable { moved_to: Some(aside), .. } => Some(format!(
+                "The saved state could not be read, so Pythia starts fresh. The old file is kept as {}.",
+                aside.display()
+            )),
+            Loaded::Unreadable { error, moved_to: None } => Some(format!(
+                "The saved state could not be read ({error}). Pythia starts fresh and does not save, so the old file stays as it is."
+            )),
+        }
+    }
+}
+
 /// Write `state` to `path` atomically (temporary file, fsync, rename).
 pub fn save(path: &Path, state: &Persisted) -> std::io::Result<()> {
     let json = serde_json::to_vec(state).map_err(std::io::Error::other)?;
@@ -66,6 +89,18 @@ pub fn load(path: &Path) -> Loaded {
 mod tests {
     use super::*;
     use crate::engine::Engine;
+
+    #[test]
+    fn a_file_that_could_not_be_moved_aside_is_never_saved_over() {
+        let l = Loaded::Unreadable { error: "denied".into(), moved_to: None };
+        assert!(!l.may_save());
+        assert!(l.notice().unwrap().contains("denied"));
+        let l = Loaded::Unreadable { error: "x".into(), moved_to: Some(PathBuf::from("state.json.unreadable-1")) };
+        assert!(l.may_save());
+        assert!(l.notice().unwrap().contains("state.json.unreadable-1"));
+        assert!(Loaded::Missing.may_save());
+        assert_eq!(Loaded::Missing.notice(), None);
+    }
 
     fn dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("pythia-persist-{tag}-{}", std::process::id()));

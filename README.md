@@ -32,7 +32,7 @@ The builds are not code-signed yet. Windows asks once (More info, then Run anywa
 
 - An autopilot is an amount of money that trades one strategy on its own until you stop it or a stop rule fires. Several run side by side, each measured against BTC.
 - Crypto, US shares and ETFs trade on the Alpaca paper account. The long/short books trade perps on paper, or on a Bybit demo account if you add demo keys.
-- The risk manager sits in front of every order: kill switch, daily loss and drawdown limits, exposure caps, volatility targeting. If something is unclear, it refuses.
+- The risk manager sits in front of every order that opens or adds to a position (closing is never blocked): kill switch, daily loss and drawdown limits, exposure caps, volatility targeting. If something is unclear, it refuses.
 - Every study in the lab is written down before its first run, tested out of sample after costs, and its Sharpe is deflated by the number of trials so far.
 - Models (volatility, coin ranking, return quantiles) are trained in the lab and served by the engine. They run in shadow before they can affect a trade.
 - Alerts go to Telegram or any webhook, in English or German.
@@ -74,7 +74,7 @@ Without `PYTHIA_DATA` the forward chart is skipped.
 
 ## Getting started
 
-You need Node.js (current LTS), Rust 1.85 or newer and, for the lab, Python 3.
+You need Node.js (current LTS), Rust 1.90 or newer and, for the lab, Python 3.
 
 Desktop app:
 
@@ -106,6 +106,8 @@ python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 python -m pytest tests
 ```
+
+The lab needs Linux or macOS (it locks files with `fcntl`); on Windows use WSL.
 
 The data comes from the recorder in `research/recorder` and its history backfill. [`research/lab/README.md`](research/lab/README.md) lists every study, [`research/ops/README.md`](research/ops/README.md) the scheduled jobs.
 
@@ -139,10 +141,11 @@ On Windows the npm scripts remove `CC` and `CXX` from the environment, because p
 ## Safety
 
 - A fresh install trades nothing real. Autopilots start on paper or on a venue's demo account.
-- Live trading needs your own keys and a typed confirmation per venue. Nothing arms itself.
+- Live trading needs your own keys, the venues you choose and a typed confirmation. Nothing arms itself.
 - Keys live in the OS keychain or the server's environment and are never logged or sent to the UI.
 - Pythia has no withdrawal, deposit or transfer function. Give API keys trade permission only.
-- Crypto spot is long only, shorts exist only on perps, Polymarket is read only.
+- Two small wallets on the owner's own server are the exception to API keys; they are capped in code and off by default.
+- Crypto spot is long only, perps can short on paper or demo, share shorts are off by default, Polymarket is read only.
 
 [SAFETY.md](SAFETY.md) has the full list. Security issues go through [SECURITY.md](SECURITY.md).
 

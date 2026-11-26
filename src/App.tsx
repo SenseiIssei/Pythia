@@ -5,87 +5,67 @@ import { activeTab, navFor, isVisible, resolvePage, tabsFor, type PageId } from 
 import { onOpenPage } from "./navigate";
 import { currentDeepLink, openPythiaHref, pageQuery, startScreen } from "./deepLink";
 import { EmbedFrame } from "./components/EmbedFrame";
-import { Segmented, TabBar } from "./design";
+import { Segmented, Spinner, TabBar } from "./design";
 import { setThemePref, useTheme } from "./design/theme";
 import { setUiMode, useUiMode, type UiMode } from "./uiMode";
 import { Home as HomePage } from "./pages/Home";
 import { StoreProvider, useStore } from "./store";
+import { PageHost, pageLoader, type LoadedPage } from "./pageLoader";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { DataHealthBadge } from "./components/DataHealth";
 import { isTauri } from "./engine";
 import { minimizeWindow, hideWindow } from "./window";
 import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
 import { Onboarding, hasSeenOnboarding } from "./components/Onboarding";
-import { Autopilots } from "./pages/Autopilots";
-import { RealMoney } from "./pages/RealMoney";
-import { Wallet } from "./pages/Wallet";
-import { Activity } from "./pages/Activity";
-import { Notifications } from "./pages/Notifications";
-import { Dashboard } from "./pages/Dashboard";
-import { Markets } from "./pages/Markets";
-import { Positions } from "./pages/Positions";
-import { Wallets } from "./pages/Wallets";
-import { Strategies } from "./pages/Strategies";
-import { Composer } from "./pages/Composer";
-import { Backtest } from "./pages/Backtest";
-import { Optimizer } from "./pages/Optimizer";
-import { Analytics } from "./pages/Analytics";
-import { Correlation } from "./pages/Correlation";
-import { Signals } from "./pages/Signals";
-import { Predictions } from "./pages/Predictions";
-import { Models } from "./pages/Models";
-import { Lab } from "./pages/Lab";
-import { Cs2 } from "./pages/Cs2";
-import { Cards } from "./pages/Cards";
-import { Research } from "./pages/Research";
-import { Live } from "./pages/Live";
-import { PumpfunWallet } from "./pages/PumpfunWallet";
-import { Trends } from "./pages/Trends";
-import { News } from "./pages/News";
-import { LabLive } from "./pages/LabLive";
-import { Progress } from "./pages/Progress";
-import { Risk } from "./pages/Risk";
-import { Journal } from "./pages/Journal";
-import { Settings } from "./pages/Settings";
-import { About } from "./pages/About";
 
 // "practice" is not a page of its own any more: resolvePage sends it to the
-// Autopilot page, which shows what Practice showed.
-const PAGES: Record<Exclude<PageId, "practice">, () => ReactNode> = {
-  home: HomePage,
-  autopilot: Autopilots,
-  realmoney: RealMoney,
-  wallet: Wallet,
-  activity: Activity,
-  notifications: Notifications,
-  dashboard: Dashboard,
-  markets: Markets,
-  positions: Positions,
-  wallets: Wallets,
-  strategies: Strategies,
-  composer: Composer,
-  backtest: Backtest,
-  optimizer: Optimizer,
-  analytics: Analytics,
-  correlation: Correlation,
-  cs2: Cs2,
-  signals: Signals,
-  predictions: Predictions,
-  models: Models,
-  lab: Lab,
-  cards: Cards,
-  research: Research,
-  live: Live,
-  pumpfun: PumpfunWallet,
-  trends: Trends,
-  news: News,
-  lablive: LabLive,
-  progress: Progress,
-  risk: Risk,
-  journal: Journal,
-  settings: Settings,
-  about: About,
+// Autopilot page, which shows what Practice showed. Home is part of the first
+// bundle; every other page is its own chunk.
+const PAGES: Record<Exclude<PageId, "practice" | "home">, LoadedPage> = {
+  autopilot: pageLoader(() => import("./pages/Autopilots").then((m) => m.Autopilots)),
+  realmoney: pageLoader(() => import("./pages/RealMoney").then((m) => m.RealMoney)),
+  wallet: pageLoader(() => import("./pages/Wallet").then((m) => m.Wallet)),
+  activity: pageLoader(() => import("./pages/Activity").then((m) => m.Activity)),
+  notifications: pageLoader(() => import("./pages/Notifications").then((m) => m.Notifications)),
+  dashboard: pageLoader(() => import("./pages/Dashboard").then((m) => m.Dashboard)),
+  markets: pageLoader(() => import("./pages/Markets").then((m) => m.Markets)),
+  positions: pageLoader(() => import("./pages/Positions").then((m) => m.Positions)),
+  wallets: pageLoader(() => import("./pages/Wallets").then((m) => m.Wallets)),
+  strategies: pageLoader(() => import("./pages/Strategies").then((m) => m.Strategies)),
+  composer: pageLoader(() => import("./pages/Composer").then((m) => m.Composer)),
+  backtest: pageLoader(() => import("./pages/Backtest").then((m) => m.Backtest)),
+  optimizer: pageLoader(() => import("./pages/Optimizer").then((m) => m.Optimizer)),
+  analytics: pageLoader(() => import("./pages/Analytics").then((m) => m.Analytics)),
+  correlation: pageLoader(() => import("./pages/Correlation").then((m) => m.Correlation)),
+  cs2: pageLoader(() => import("./pages/Cs2").then((m) => m.Cs2)),
+  signals: pageLoader(() => import("./pages/Signals").then((m) => m.Signals)),
+  predictions: pageLoader(() => import("./pages/Predictions").then((m) => m.Predictions)),
+  models: pageLoader(() => import("./pages/Models").then((m) => m.Models)),
+  lab: pageLoader(() => import("./pages/Lab").then((m) => m.Lab)),
+  cards: pageLoader(() => import("./pages/Cards").then((m) => m.Cards)),
+  research: pageLoader(() => import("./pages/Research").then((m) => m.Research)),
+  live: pageLoader(() => import("./pages/Live").then((m) => m.Live)),
+  pumpfun: pageLoader(() => import("./pages/PumpfunWallet").then((m) => m.PumpfunWallet)),
+  trends: pageLoader(() => import("./pages/Trends").then((m) => m.Trends)),
+  news: pageLoader(() => import("./pages/News").then((m) => m.News)),
+  lablive: pageLoader(() => import("./pages/LabLive").then((m) => m.LabLive)),
+  progress: pageLoader(() => import("./pages/Progress").then((m) => m.Progress)),
+  risk: pageLoader(() => import("./pages/Risk").then((m) => m.Risk)),
+  journal: pageLoader(() => import("./pages/Journal").then((m) => m.Journal)),
+  settings: pageLoader(() => import("./pages/Settings").then((m) => m.Settings)),
+  about: pageLoader(() => import("./pages/About").then((m) => m.About)),
 };
+
+const PAGE_IDS = ["home", ...Object.keys(PAGES)] as Exclude<PageId, "practice">[];
+
+function PageView({ id }: { id: Exclude<PageId, "practice"> }) {
+  return id === "home" ? <HomePage /> : <PageHost page={PAGES[id]} fallback={<Spinner />} />;
+}
+
+/** Fetch the other pages' code once the first screen is up, so opening one does not wait. */
+function preloadPages() {
+  for (const p of Object.values(PAGES)) void p.load().catch(() => {});
+}
 
 /** Below this width the sidebar becomes a drawer and the phone tab bar shows. */
 const NARROW = "(max-width: 767px)";
@@ -248,7 +228,17 @@ function Chrome({ initial }: { initial: PageId | null }) {
   const sections = [...new Set(nav.map((n) => n.section))];
   // Leaving advanced mode while on an advanced page would strand the user on a
   // screen with no way back to it in the sidebar. A page the URL named stays open in either mode.
-  const current = isVisible(page, mode) || page === initial ? (resolvePage(page) as keyof typeof PAGES) : "home";
+  const current = isVisible(page, mode) || page === initial ? (resolvePage(page) as Exclude<PageId, "practice">) : "home";
+  // Every page opened so far. The others are not mounted: their code, their
+  // first reads and their re-render on every engine tick wait until someone looks.
+  const openedRef = useRef(new Set<Exclude<PageId, "practice">>());
+  openedRef.current.add(current);
+  const opened = openedRef.current;
+
+  useEffect(() => {
+    const id = window.setTimeout(preloadPages, 1_500);
+    return () => window.clearTimeout(id);
+  }, []);
 
   function go(id: PageId) {
     setPage(id);
@@ -409,18 +399,15 @@ function Chrome({ initial }: { initial: PageId | null }) {
           </AnimatePresence>
         )}
 
-        {/* page host: all pages mounted, inactive hidden, for instant switching */}
+        {/* page host: a page mounts when it is first opened and stays mounted, hidden, after that */}
         <main ref={mainRef} className="pt-scroll min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden bg-canvas" data-scroll-container="">
-          {(Object.keys(PAGES) as (keyof typeof PAGES)[]).map((id) => {
-            const Page = PAGES[id];
-            return (
-              <div key={id} style={{ display: current === id ? "block" : "none" }} className="px-4 pb-12 pt-6 sm:px-8 sm:pt-8">
-                <ErrorBoundary>
-                  <Page />
-                </ErrorBoundary>
-              </div>
-            );
-          })}
+          {PAGE_IDS.filter((id) => opened.has(id)).map((id) => (
+            <div key={id} style={{ display: current === id ? "block" : "none" }} className="px-4 pb-12 pt-6 sm:px-8 sm:pt-8">
+              <ErrorBoundary>
+                <PageView id={id} />
+              </ErrorBoundary>
+            </div>
+          ))}
         </main>
       </div>
 
@@ -440,11 +427,10 @@ function Chrome({ initial }: { initial: PageId | null }) {
 /** One page alone in an iframe (`?page=<id>&embed=1`); a page asking for another opens it in the whole app. */
 function Embedded({ id }: { id: PageId }) {
   useEffect(() => onOpenPage((to) => void window.open(`${window.location.pathname}${pageQuery(to)}`, "_blank", "noopener")), []);
-  const Page = PAGES[resolvePage(id) as keyof typeof PAGES];
   return (
     <EmbedFrame href={openPythiaHref(window.location)}>
       <ErrorBoundary>
-        <Page />
+        <PageView id={resolvePage(id) as Exclude<PageId, "practice">} />
       </ErrorBoundary>
     </EmbedFrame>
   );

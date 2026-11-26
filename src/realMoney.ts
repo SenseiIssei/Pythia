@@ -95,6 +95,6 @@ export function liveFills(journal: readonly JournalEntry[], limit = 50): Journal
 export function euro(v: number | null | undefined, signed = false): string {
   if (v == null || !Number.isFinite(v)) return "n/a";
   const x = Math.abs(v) < 0.005 ? 0 : v;
-  const s = Math.abs(x).toLocaleString(undefined, { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const s = Math.abs(x).toLocaleString("en-US", { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return `${signed ? (x > 0 ? "+" : x < 0 ? "-" : "") : x < 0 ? "-" : ""}${s}`;
 }

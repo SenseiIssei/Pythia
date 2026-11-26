@@ -647,7 +647,7 @@ export function walletState(v: Pick<OnchainView, "status" | "running" | "killFil
   const wallet = (lim?.kind ?? s?.control?.limits ?? s?.ack?.limits) === "wallet";
   const caps = lim?.maxTradeUsd != null && lim.maxTotalUsd != null
     ? wallet
-      ? ` Limits: wallet. At most ${usdText(lim.maxTradeUsd)} a swap (a quarter of the wallet), ${usdText(lim.maxTotalUsd)} in all (the wallet's value), no daily loss limit (the wallet is the limit).`
+      ? ` Limits: wallet. At most ${usdText(lim.maxTradeUsd)} a swap (a quarter of the wallet), ${usdText(lim.maxTotalUsd)} in all (the wallet's value), ${usdText(lim.maxDailyLossUsd)} loss a day; the code's caps are never passed.`
       : ` At most ${usdText(lim.maxTradeUsd)} a swap, ${usdText(lim.maxTotalUsd)} in the wallet${lim.maxDailyLossUsd != null ? `, ${usdText(lim.maxDailyLossUsd)} loss a day` : ""}.`
     : "";
   if (v.killFile || s?.kill) {

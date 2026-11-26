@@ -546,7 +546,7 @@ export function useMockAutopilot(names: Record<string, string>): MockAutopilot |
   const scenario = requested();
   if (scenario && !state) state = seed(scenario, names);
   const v = useSyncExternalStore(scenario ? subscribe : noop, () => (scenario ? version : -1));
-  // Every page stays mounted, so the sample ticks for as long as the tab is open.
+  // A page stays mounted once opened, so the sample ticks for as long as the tab is open.
   useEffect(() => {
     if (scenario) ensureTimer();
   }, [scenario]);

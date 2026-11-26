@@ -1,5 +1,5 @@
-// Keeping a page current without a reload. Every page stays mounted (App.tsx
-// hides the others), so "visible" means: this page is the one shown and the
+// Keeping a page current without a reload. A page stays mounted once it was
+// opened (App.tsx hides the others), so "visible" means: this page is the one shown and the
 // browser tab is in front. Only then does a page poll its endpoints.
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";

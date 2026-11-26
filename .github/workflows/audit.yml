@@ -1,0 +1,30 @@
+# Known vulnerabilities in what we ship: after a lockfile change and once a week.
+# Warnings (unmaintained crates) do not fail; the known ones are listed in
+# SECURITY.md.
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths: ["Cargo.lock", "package-lock.json", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - run: npm audit --audit-level=high

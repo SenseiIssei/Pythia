@@ -53,8 +53,12 @@ enum Cmd {
         #[arg(long)]
         keep: bool,
     },
-    /// Switch the kill switch on or off. Asks first unless --yes.
+    /// The kill switch. `kill on` always stops new trades, also when it is on
+    /// already; `kill off` lets them start again. Without a word it switches
+    /// to the other side. Asks first unless --yes; `kill on` never asks.
     Kill {
+        #[arg(value_enum)]
+        to: Option<KillTo>,
         #[arg(long)]
         yes: bool,
     },
@@ -71,6 +75,12 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Debug, clap::ValueEnum)]
+enum KillTo {
+    On,
+    Off,
 }
 
 struct Api {
@@ -160,7 +170,7 @@ fn main() -> ExitCode {
             }
             steer(&api, cmd, &id, "stopped")
         }
-        Cmd::Kill { yes } => kill(&api, yes),
+        Cmd::Kill { to, yes } => kill(&api, to, yes),
         Cmd::Preflight => api.get("/api/preflight").map(|p| {
             if cli.json {
                 print_json(&p)
@@ -187,11 +197,23 @@ fn steer(api: &Api, cmd: Value, id: &str, done: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn kill(api: &Api, yes: bool) -> Result<(), String> {
+/// Whether the switch has to be flipped, from where it is and what was asked.
+fn kill_flips(on: bool, to: Option<KillTo>) -> bool {
+    match to {
+        None => true,
+        Some(t) => (t == KillTo::On) != on,
+    }
+}
+
+fn kill(api: &Api, to: Option<KillTo>, yes: bool) -> Result<(), String> {
     let state = api.get("/api/state")?;
     let on = state["limits"]["killSwitch"].as_bool().unwrap_or(false);
+    if !kill_flips(on, to) {
+        println!("Kill switch {} already.", if on { "on" } else { "off" });
+        return Ok(());
+    }
     let next = if on { "off" } else { "on" };
-    if !yes {
+    if !yes && to != Some(KillTo::On) {
         print!("The kill switch is {}. Switch it {next}? [y/N] ", if on { "on" } else { "off" });
         std::io::stdout().flush().ok();
         let mut line = String::new();
@@ -208,13 +230,19 @@ fn kill(api: &Api, yes: bool) -> Result<(), String> {
 }
 
 fn watch(api: &Api, every: u64) -> Result<(), String> {
+    // An engine that is not there at the start is a mistake; one that goes
+    // away later is restarting, and the next look finds it again.
+    let mut state = Ok(api.get("/api/state")?);
     loop {
-        let state = api.get("/api/state")?;
         // Clear the screen and go home, so the table redraws in place.
         print!("\x1b[2J\x1b[H");
-        print_status(&state);
+        match &state {
+            Ok(s) => print_status(s),
+            Err(e) => println!("{e}"),
+        }
         println!("\nevery {every}s, Ctrl+C to quit");
         std::thread::sleep(Duration::from_secs(every));
+        state = api.get("/api/state");
     }
 }
 
@@ -431,6 +459,26 @@ fn age(started_ms: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_on_never_switches_it_off() {
+        assert!(kill_flips(false, Some(KillTo::On)));
+        assert!(!kill_flips(true, Some(KillTo::On)), "on stays on");
+        assert!(kill_flips(true, Some(KillTo::Off)));
+        assert!(!kill_flips(false, Some(KillTo::Off)));
+        assert!(kill_flips(true, None) && kill_flips(false, None), "without a word it switches");
+    }
+
+    #[test]
+    fn kill_takes_a_word_or_none() {
+        let to = |args: &[&str]| match Cli::try_parse_from(args).unwrap().cmd {
+            Cmd::Kill { to, .. } => to,
+            _ => panic!("not kill"),
+        };
+        assert_eq!(to(&["pythia", "kill"]), None);
+        assert_eq!(to(&["pythia", "kill", "on"]), Some(KillTo::On));
+        assert_eq!(to(&["pythia", "kill", "off", "--yes"]), Some(KillTo::Off));
+    }
 
     #[test]
     fn money_is_grouped_and_signed() {

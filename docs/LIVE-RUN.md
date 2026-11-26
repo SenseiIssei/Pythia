@@ -53,7 +53,7 @@ If it says *no keys*, the `.env` wasn't picked up (check you're in the repo root
 ### Crypto exchange (optional — 24/7, unlike equities)
 
 Equities only trade during US market hours. If you want something to actually happen at 3am, add a
-crypto exchange: **Kraken**, **Binance**, **Bybit** or **OKX**.
+crypto exchange: **Kraken**, **Binance**, **Bybit**, **OKX** or **Coinbase**.
 
 - Desktop: *Settings → Crypto exchanges* → paste key + secret (+ passphrase for OKX) → **Save & select**.
 - Server: `PYTHIA_EXCHANGE=kraken`, `PYTHIA_EXCHANGE_KEY`, `PYTHIA_EXCHANGE_SECRET` in `.env`.

@@ -137,9 +137,9 @@ Pythia as far as we know; each is re-checked on every scan.
 
 | Component | Advisory | Why it stays for now |
 | --- | --- | --- |
-| `glib` 0.18 (Rust, Linux only) | RUSTSEC-2024-0429, unsound `VariantStrIter` | Pulled in by Tauri's GTK 0.18 stack on Linux. The fix is in glib 0.20, which Tauri 2 does not use yet. Pythia ships for Windows and never calls this iterator. Goes away with Tauri's move to newer gtk-rs. |
-| `proc-macro-error`, `unic-*`, `zbus_names`, `zvariant*` (Rust) | unmaintained (RUSTSEC-2024-0370, -2025-0075/0080/0081/0098/0100, -2026-0370/0371/0372) | Transitive dependencies of Tauri (build-time macros, URL pattern parsing, Linux D-Bus notifications). No known vulnerability; replaced when Tauri replaces them. |
-| `braces` via `tailwindcss` 3 (npm, build tooling only) | GHSA-vfj7-8cjw-p6xm, stack exhaustion on deeply nested patterns | No fixed version exists. It only parses the glob patterns in `tailwind.config.js`, which are ours; nothing from users or the network reaches it, and it is not part of the shipped app (`npm audit --omit=dev` is clean). Removed with the move to Tailwind 4. |
+| `glib` 0.18 (Rust, Linux only) | RUSTSEC-2024-0429, unsound `VariantStrIter` | Pulled in by Tauri's GTK 0.18 stack, so it is in the Linux packages only. The fix is in glib 0.20, which Tauri 2 does not use yet; Dependabot cannot raise it. Pythia never calls this iterator. Goes away with Tauri's move to newer gtk-rs. |
+| `chrono`, `chrono-tz` (Rust) | unmaintained (RUSTSEC-2026-0543, -0555) | Used for every date in the engine. No known vulnerability; a move to `jiff` is in `PLAN.md`. |
+| `proc-macro-error`, `zbus_names`, `zvariant*` (Rust) | unmaintained (RUSTSEC-2024-0370, -2026-0370/0371/0372) | Transitive dependencies of Tauri (build-time macros, Linux D-Bus notifications). No known vulnerability; replaced when Tauri replaces them. |
 
 ## Tooling
 

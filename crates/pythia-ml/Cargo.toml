@@ -2,7 +2,7 @@
 name = "pythia-ml"
 version = "0.5.1"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.90"
 description = "Pythia model inference: LightGBM tree evaluation, feature parity with the research lab, shadow scoring and drift checks."
 
 # Pure computation on purpose: no network, no async, no native runtime. The

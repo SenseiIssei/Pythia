@@ -21,6 +21,10 @@ use tauri::{Emitter, Manager};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // First, so a second start ends before it touches anything: two engines
+        // would trade the same keys and write the same state file. The running
+        // app may be hidden in the tray, so it shows its window instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_main(app)))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -36,6 +40,9 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            if let Ok(dir) = app.path().app_data_dir() {
+                pythia_core::crash::install(dir.join("crash.log"), env!("CARGO_PKG_VERSION"));
+            }
             tray::build_tray(&app.handle().clone())?;
             // Recalibrated costs, if the user has any: `PYTHIA_COSTS_FILE`, or
             // `costs.json` in the app's data directory. Otherwise the defaults
@@ -95,14 +102,19 @@ pub fn run() {
                     // tick). Crypto quotes, candles and books come from the
                     // feed runner spawned below, with failover across venues.
                     if n % 8 == 1 {
-                        let poly = marketdata::fetch_polymarket().await;
                         // Real equity quotes when Alpaca keys are in the vault
-                        // (otherwise those markets stay on the simulator).
+                        // (otherwise those markets stay on the simulator);
+                        // Alpaca's crypto data is public. Together, not one
+                        // after the other: the tick waits for the slowest of
+                        // the three (5 s at most), not for their sum.
                         let (id, secret) = alpaca_keys();
                         let feed = commands::get_prefs().alpaca_feed;
-                        let mut alpaca = marketdata::fetch_alpaca(&id, &secret, &feed).await;
-                        // Alpaca's crypto data is public: real prices even without keys.
-                        alpaca.extend(marketdata::fetch_alpaca_crypto().await);
+                        let (poly, mut alpaca, crypto) = tokio::join!(
+                            marketdata::fetch_polymarket(),
+                            marketdata::fetch_alpaca(&id, &secret, &feed),
+                            marketdata::fetch_alpaca_crypto(),
+                        );
+                        alpaca.extend(crypto);
                         let mut e = engine.lock().unwrap();
                         e.apply_polymarket(&poly);
                         e.apply_alpaca(&alpaca);
@@ -114,19 +126,13 @@ pub fn run() {
                     if n % 40 == 1 {
                         let (id, secret) = alpaca_keys();
                         let p = commands::get_prefs();
-                        let mut series = marketdata::fetch_alpaca_bars(
-                            &id,
-                            &secret,
-                            &p.alpaca_feed,
-                            &p.bar_timeframe,
-                            10,
-                        )
-                        .await;
-                        // Three days: crypto never closes, so ten days of small
-                        // bars would overrun the single page fetched.
-                        series.extend(
-                            marketdata::fetch_alpaca_crypto_bars(&p.bar_timeframe, 3).await,
+                        // Three days of crypto: it never closes, so ten days of
+                        // small bars would overrun the single page fetched.
+                        let (mut series, crypto) = tokio::join!(
+                            marketdata::fetch_alpaca_bars(&id, &secret, &p.alpaca_feed, &p.bar_timeframe, 10),
+                            marketdata::fetch_alpaca_crypto_bars(&p.bar_timeframe, 3),
                         );
+                        series.extend(crypto);
                         if !series.is_empty() {
                             engine.lock().unwrap().apply_bars(&series);
                         }
@@ -300,6 +306,13 @@ pub fn run() {
             commands::save_prefs,
             commands::test_llm_key,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Pythia");
+        .build(tauri::generate_context!())
+        .expect("error while running Pythia")
+        .run(|app, event| {
+            // Quit from the tray: what happened since the last minute's
+            // checkpoint is saved too.
+            if let tauri::RunEvent::Exit = event {
+                persist::save(app);
+            }
+        });
 }

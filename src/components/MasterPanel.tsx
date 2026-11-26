@@ -33,9 +33,6 @@ import {
 import { canControl, pumpfunControl, sol, type ControlFile, type ControlPatch, type LimitsKind, type LowFunds, type PumpfunView, type StatusControl } from "../pumpfunLive";
 import { canControlOnchain, onchainControl, usdText, type OnchainView } from "../onchainLive";
 
-/** The wallet is the limit: the rows that have no number then. */
-export const WALLET_LIMIT = "none (the wallet is the limit)";
-
 export interface MasterProps {
   bot: Bot;
   control: StatusControl | null;
@@ -226,7 +223,8 @@ export function pumpfunMasterProps(v: PumpfunView): MasterProps {
     rows: (
       <>
         <Row label="Stake per trade" value={sol(s?.stake?.sol ?? null, false, 3)} sub={s?.stake?.why ?? undefined} help="What the next buy stakes, as the live service works it out." />
-        {kind === "wallet" && <Row label="Daily loss, total budget" value={WALLET_LIMIT} help="With limits=wallet there is no daily loss limit and no total budget: the wallet's SOL is what can be lost." />}
+        {kind === "wallet" && <Row label="Daily loss limit" value={sol(s?.limits?.maxDailyLossSol ?? null, false, 3)} help="The code's cap. The confirmation file, the app and the environment can only lower it." />}
+        {kind === "wallet" && <Row label="Total budget" value={sol(s?.limits?.maxTotalSol ?? null, false, 3)} help="The code's cap on the test in all. The wallet only sizes the stake under it." />}
       </>
     ),
   };
@@ -252,9 +250,9 @@ export function onchainMasterProps(v: OnchainView): MasterProps {
     rows: (
       <>
         {s?.control?.bookUsd != null && <Row label="Per book" value={usdText(s.control.bookUsd)} sub={s.control.ackBookUsd != null ? `file ${usdText(s.control.ackBookUsd)}` : undefined} help="The US dollars each book may use now." />}
-        <Row label="Per swap, at most" value={usdText(lim?.maxTradeUsd)} help={kind === "wallet" ? "A quarter of the wallet's value." : "The confirmation file's cap."} />
-        <Row label="In all, at most" value={usdText(lim?.maxTotalUsd)} help={kind === "wallet" ? "The wallet's value." : "The confirmation file's cap."} />
-        <Row label="Daily loss limit" value={kind === "wallet" ? WALLET_LIMIT : usdText(lim?.maxDailyLossUsd)} />
+        <Row label="Per swap, at most" value={usdText(lim?.maxTradeUsd)} help={kind === "wallet" ? "A quarter of the wallet's value, never above the code's cap." : "The confirmation file's cap."} />
+        <Row label="In all, at most" value={usdText(lim?.maxTotalUsd)} help={kind === "wallet" ? "The wallet's value, never above the code's cap." : "The confirmation file's cap."} />
+        <Row label="Daily loss limit" value={usdText(lim?.maxDailyLossUsd)} />
       </>
     ),
   };

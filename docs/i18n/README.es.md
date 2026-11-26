@@ -32,7 +32,7 @@ Las versiones aún no están firmadas. Windows pregunta una vez (Más informaci�
 
 - Un autopiloto es una cantidad de dinero que opera una estrategia por su cuenta hasta que lo detienes o salta una regla de parada. Varios funcionan en paralelo y cada uno se mide contra BTC.
 - Cripto, acciones de EE. UU. y ETF operan en la cuenta de papel de Alpaca. Los libros largo/corto operan perpetuos en papel, o en una cuenta demo de Bybit si añades claves de demo.
-- Delante de cada orden está el gestor de riesgo: interruptor de emergencia, límites de pérdida diaria y de drawdown, topes de exposición, objetivo de volatilidad. Si algo no está claro, rechaza la orden.
+- Delante de cada orden que abre o amplía una posición está el gestor de riesgo (cerrar nunca se bloquea): interruptor de emergencia, límites de pérdida diaria y de drawdown, topes de exposición, objetivo de volatilidad. Si algo no está claro, rechaza la orden.
 - Cada estudio del laboratorio se registra antes de su primera ejecución, se prueba fuera de muestra después de costes y su Sharpe se deflacta según el número de pruebas hechas hasta ahora.
 - Los modelos (volatilidad, ranking de monedas, cuantiles de rentabilidad) se entrenan en el laboratorio y los ejecuta el motor. Primero funcionan en modo sombra antes de poder influir en una operación.
 - Las alertas llegan por Telegram o cualquier webhook, en inglés o alemán.
@@ -74,7 +74,7 @@ Sin `PYTHIA_DATA` se omite el gráfico del historial real.
 
 ## Primeros pasos
 
-Necesitas Node.js (LTS actual), Rust 1.85 o más reciente y, para el laboratorio, Python 3.
+Necesitas Node.js (LTS actual), Rust 1.90 o más reciente y, para el laboratorio, Python 3.
 
 Aplicación de escritorio:
 
@@ -107,6 +107,8 @@ pip install -r requirements.txt
 python -m pytest tests
 ```
 
+El laboratorio necesita Linux o macOS (bloquea archivos con `fcntl`); en Windows usa WSL.
+
 Los datos vienen del grabador en `research/recorder` y de su carga histórica. [`research/lab/README.md`](../../research/lab/README.md) lista cada estudio y [`research/ops/README.md`](../../research/ops/README.md) las tareas programadas.
 
 Comprobaciones:
@@ -116,6 +118,8 @@ npm run check
 npm run preflight
 npm run security:scan
 ```
+
+Instala el hook de pre-commit una vez por clon, para que ningún secreto, dirección ni ruta personal llegue a un commit: `git config core.hooksPath scripts/hooks` (o `npm run hooks:install`).
 
 En Windows, los scripts de npm quitan `CC` y `CXX` del entorno, porque las rutas con espacios rompen las compilaciones nativas de Rust.
 
@@ -137,10 +141,11 @@ En Windows, los scripts de npm quitan `CC` y `CXX` del entorno, porque las rutas
 ## Seguridad
 
 - Una instalación nueva no opera nada real. Los autopilotos empiezan en papel o en la cuenta demo de un mercado.
-- Operar en real requiere tus propias claves y una confirmación escrita por cada mercado. Nada se activa solo.
+- Operar en real requiere tus propias claves, los mercados que elijas y una confirmación escrita. Nada se activa solo.
 - Las claves se guardan en el llavero del sistema o en el entorno del servidor, nunca se registran ni se envían a la interfaz.
 - Pythia no tiene funciones de retirada, depósito ni transferencia. Da a las claves de API solo permiso de trading.
-- El spot de cripto es solo largo, los cortos existen solo en perpetuos y Polymarket es de solo lectura.
+- Dos carteras pequeñas en el servidor del propietario son la excepción a las claves de API; están limitadas en el código y apagadas por defecto.
+- El spot de cripto es solo largo, los perpetuos pueden ir en corto en papel o demo, los cortos de acciones están apagados por defecto y Polymarket es de solo lectura.
 
 La lista completa está en [SAFETY.md](../../SAFETY.md). Los problemas de seguridad se reportan según [SECURITY.md](../../SECURITY.md).
 
