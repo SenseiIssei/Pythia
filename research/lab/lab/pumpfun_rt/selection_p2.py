@@ -219,15 +219,17 @@ def live_only(live: dict, paper: dict, sig: list[dict], skip_stale: bool = False
     for k in paper.get("skipped") or []:
         pskip[(k.get("rule"), k.get("mint"))].append(k)
     prow: dict[tuple[str, str], list[dict]] = collections.defaultdict(list)
+    known = {k.get("mint") for k in paper.get("skipped") or []}
     for src in ("ledger", "failed"):
         for r in paper.get(src) or []:
-            prow[(r.get("rule"), r.get("mint"))].append({**r, "_src": src})
+            known.add(r.get("mint"))
+            if r.get("rule") in RULES:                       # only the live rules are looked up: no copy of the rest
+                prow[(r.get("rule"), r.get("mint"))].append({**r, "_src": src})
     born: dict[str, float] = {}
     for (rule, _), rows in prow.items():
         for p in rows:
             if (v := R._f(p.get("signal_ms"))) is not None and v < born.get(rule, float("inf")):
                 born[rule] = v
-    known = {m for _, m in prow} | {k.get("mint") for k in paper.get("skipped") or []}
     out = []
     for i, r in enumerate(live.get("ledger") or []):
         t = R._f(r.get("signal_ms"))

@@ -1123,6 +1123,44 @@ def read_csv(p: Path) -> list[dict]:
         return []
 
 
+def read_ledger(p: Path, keep) -> tuple[list[dict], dict[str, tuple[int, float]], dict[str, tuple[int, float]]]:
+    """The paper ledger in one pass, for a reader that cannot hold it whole: (rows, taint_by_book, stale_by_book), both
+    over every row; rows the whole row of each book keep(rule) names, of the other books one {rule, mint} per coin (the
+    first), all P2's live_only reads of them: the coins the collector had."""
+    rows: list[dict] = []
+    taint: dict[str, tuple[int, float]] = {}
+    st: dict[str, tuple[int, float]] = {}
+    seen: set[str] = set()
+    kept: dict[str, bool] = {}
+    try:
+        with p.open(newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                b = r.get("rule") or "?"
+                if (t := tainted(r)) or stale(r):
+                    by = taint if t else st
+                    n, s = by.get(b, (0, 0.0))
+                    by[b] = (n + 1, s + (_f(r.get("pnl_sol")) or 0.0))
+                if (rule := r.get("rule") or "") not in kept:
+                    kept[rule] = bool(keep(rule))
+                if kept[rule]:
+                    rows.append(r)
+                elif (m := r.get("mint") or "") not in seen:
+                    seen.add(m)
+                    rows.append({"rule": sys.intern(rule), "mint": m})
+    except OSError:
+        pass
+    return rows, taint, st
+
+
+def daily_book(rule: str) -> bool:
+    """The books daily() reads whole rows of: the live bot's rules (P2, P2R2, the calibration's twin), the 10 EUR books
+    (P3) and E1's forward books. The ledger passed 580,208 rows (207 MB) on 2026-11-25: whole, as dicts, 1.4 GB, and
+    the job (1 GB) was killed, exit 137, two days running; taint and stale counts still cover every book."""
+    from .selection_p2 import RULES
+    from .slippage_e1 import parse
+    return rule in RULES or rule == TWIN or rule in {n for n, _ in TEN} or parse(rule) is not None
+
+
 def calib_line(cal: dict, word: str, days_covered: float) -> str:
     def pc(x):
         return "n/a" if x is None else f"{x * 100:+.1f} %"
@@ -1145,8 +1183,7 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
     since = (read_json(paper_dir() / "state.json") or {}).get("realistic_since")
     lo = now_ms - CALIB_DAYS * DAY_MS
     start = max(lo, int(since)) if since else now_ms
-    paper = read_csv(paper_dir() / "ledger.csv")
-    taint, stale_ = taint_by_book(paper), stale_by_book(paper)
+    paper, taint, stale_ = read_ledger(paper_dir() / "ledger.csv", daily_book)
     cal = calibrate(read_csv(data_dir() / "ledger.csv"), paper, start, now_ms)
     covered = (now_ms - start) / DAY_MS
     word = verdict(cal, covered)

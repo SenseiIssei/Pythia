@@ -438,6 +438,89 @@ def test_the_job_is_in_the_table():
     assert "command: python -m lab.pumpfun_rt.realistic" in text[i:i + 600]
 
 
+LEDGER_COLS = ("rule,family,mint,name,symbol,created_ms,signal_ms,land_ms,exit_signal_ms,exit_ms,exit_why,signal_price,"
+               "entry_price,exit_price,proceeds_sol,pnl_sol,ret,hold_s,prob,dev_dumped,migrated,gap,age_s,progress,"
+               "lat_buy_ms,slip,stake_sol").split(",")
+
+
+def big_ledger(p, now, n_other=12_000):
+    """A paper ledger as the collector writes it: the twin's rows, a 10 EUR book's, an E1 book's, a tainted and a
+    late row, and n_other rows of 40 other books on 300 coins (the bulk the job does not read whole)."""
+    def row(rule, i, t, **kw):
+        r = dict.fromkeys(LEDGER_COLS, "")
+        r.update(rule=rule, family="P", mint=f"{i % 300:04d}".ljust(44, "m") + "pump", name=f"Coin {i}", symbol=f"C{i}",
+                 created_ms=t - 30_000, signal_ms=t, land_ms=t + 1_500, exit_signal_ms=t + 60_000,
+                 exit_ms=t + 61_000, exit_why="take", signal_price=3.1378e-08, entry_price=3.1378e-08 * 1.01,
+                 exit_price=3.1378e-08 * 1.1, proceeds_sol=0.0934759, pnl_sol=0.0085340, ret=0.0853405,
+                 hold_s=59.5, dev_dumped=False, migrated=False, gap=False, age_s=36.212, progress=0.0758465,
+                 lat_buy_ms=1165.02, slip=-0.0145266, stake_sol=0.1)
+        r.update(kw)
+        return r
+    t0 = now - 2 * DAY
+    rows = [row(R.TWIN, i, t0 + i * 60_000 + 3_000, mint=key(100 + i)) for i in range(12)]
+    rows += [row("P_pool0_10eur", i, t0 + i * 60_000, ret=0.01 * (i % 5 - 2)) for i in range(20)]
+    rows += [row("P_pool0_wait@e1_b30", i, t0 + i * 60_000) for i in range(20)]
+    rows.append(row("P_pool0_10eur", 7, t0, land_ms=t0 - 1, pnl_sol=-0.5))           # tainted: landed before its signal
+    rows += [row(f"P_other{i % 40}", i, t0 + i * 1_000, pnl_sol=-0.001 * (i % 7)) for i in range(n_other)]
+    rows.append(row("P_other3", 1, t0, exit_signal_ms=t0, land_ms=t0 + 5, pnl_sol=0.25))   # tainted: decided early
+    with p.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=LEDGER_COLS)
+        w.writeheader()
+        w.writerows(rows)
+    return rows
+
+
+def test_the_ledger_is_read_in_one_pass_with_every_books_taint_and_the_read_books_whole(tmp_path, monkeypatch):
+    p = tmp_path / "ledger.csv"
+    big_ledger(p, T0 + 8 * DAY, n_other=2_000)
+    full = R.read_csv(p)
+    monkeypatch.setattr(R, "stale_keys", lambda: frozenset({R.stale_key(full[5]), R.stale_key(full[-3])}))
+    rows, taint, st = R.read_ledger(p, R.daily_book)
+    assert taint == R.taint_by_book(full) and set(taint) == {"P_pool0_10eur", "P_other3"}
+    assert st == R.stale_by_book(full) and set(st) == {R.TWIN, "P_other38"}
+    whole = [r for r in full if R.daily_book(r["rule"])]
+    assert [r for r in rows if len(r) > 2] == whole and len(whole) == 12 + 21 + 20
+    stubs = [r for r in rows if len(r) == 2]
+    assert len(stubs) == 300 and {r["mint"] for r in stubs} | {r["mint"] for r in whole} == {r["mint"] for r in full}
+    assert all(not R.daily_book(r["rule"]) for r in stubs)
+    assert R.read_ledger(tmp_path / "none.csv", R.daily_book) == ([], {}, {})
+
+
+def test_the_daily_job_holds_a_big_ledger_in_a_part_of_its_size_and_says_the_same(files, monkeypatch):
+    """2026-11-25 and 11-26: the job was killed at its 1 GB (exit 137), the paper ledger (207 MB) read whole as dicts
+    took 2.1 GB, P2's live_only copying every row once more (read whole, this fixture takes 7 times its size). The job
+    now stays under the file's size and says what it said on the whole ledger."""
+    import tracemalloc
+    from lab.pumpfun_rt import selection_p2 as S
+    from lab.pumpfun_rt import selection_p2r2 as S2
+    from lab.pumpfun_rt import slippage_e1 as E
+    monkeypatch.setattr(R, "sol_eur", lambda: 65.67)
+    monkeypatch.setattr(S.metrics, "register", lambda *a, **k: None)
+    now = T0 + 8 * DAY
+    (files / "live" / "measured.jsonl").write_text("\n".join(json.dumps(r) for r in measured(now)) + "\n")
+    write_csv(files / "live" / "ledger.csv", ledger_rows(12, 0, t0=now - 2 * DAY))
+    (files / "paper" / "state.json").write_text(json.dumps({"realistic_since": now - 7 * DAY - 1}))
+    big_ledger(files / "paper" / "ledger.csv", now)
+    size = (files / "paper" / "ledger.csv").stat().st_size
+    R.daily(now, write=False)                                 # once for what loads a single time (modules, files)
+    tracemalloc.start()
+    try:
+        out = R.daily(now, write=False)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < size, (peak, size)
+    full = R.read_csv(files / "paper" / "ledger.csv")
+    assert out["calibration"]["n"] == 12 and out["calibration"] == R.calibrate(
+        R.read_csv(files / "live" / "ledger.csv"), full, now - 7 * DAY, now) | {
+        k: out["calibration"][k] for k in ("days", "verdict", "line")}
+    assert out["tainted"] == 2 and out["selection"] == S.gate(files / "live", files / "paper", full, register=False)
+    assert out["selection_r2"] == S2.gate(files / "live", files / "paper", full, register=False)
+    assert out["slippage"] == E.forward(full, R.read_csv(files / "paper" / "failed.csv"))
+    ten = R.ten_status({}, full, [], 65.67, out["selection"], now)
+    assert out["ten"] == ten and ten[1]["tainted"] == 1 and ten[1]["trades"] == 20
+
+
 # ---------------------------------------------------------------- the paper books
 
 def test_the_paper_books_are_realistic_with_ideal_twins_until_the_date(files):

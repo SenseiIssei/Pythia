@@ -1187,11 +1187,13 @@ jobs:
   # R1 (research/lab/lab/pumpfun_rt/realistic.py): the realistic paper books' execution model refitted from the
   # live bot's orders of the last 7 days (read only), and the daily line "live vs realistic paper" for P_pool0_wait.
   # The collector re-reads reports/pumpfun_rt/realistic.json every 10 minutes.
+  # Killed at 1g on 2026-11-25 and 11-26 (exit 137): the paper ledger (580,208 rows, 207 MB) read whole took 2.1 GB.
+  # Now one pass, whole rows only of the books the job reads (realistic.read_ledger), 0.68 GB; 2g for its growth.
   - name: pumpfun-rt-realistic
     description: real-time pump.fun lab, PAPER, daily; the realistic paper model refitted from the last 7 days of live orders, the calibration line live vs realistic paper
     schedule: "40 6 * * *"
     command: python -m lab.pumpfun_rt.realistic
-    resources: {cpus: 1, memory: 1g}
+    resources: {cpus: 1, memory: 2g}
     timeout: 10m
 
   # F3 (research/lab/lab/pumpfun_rt/factory.py): the pump.fun factory, nightly, no language model. Optuna's TPE over
